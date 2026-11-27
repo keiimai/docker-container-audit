@@ -1,0 +1,93 @@
+# syntax=docker/dockerfile:1.29.0@sha256:572cebbc2b15e6f84c077742952674889cb63cd5e9b80abdffcbe587b6f19183
+# check=skip=InvalidDefaultArgInFrom
+
+# --- Python の調査の環境（README.md「第 1 段階の中身」）---
+# --- 固定ベースの指定（初めの値は置かない）、調べるスクリプトの受け口 audit_tools、uv ---
+ARG BASE_IMAGE
+ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.13.0@sha256:cdc6093146eb3ff6a40107b38f008b789e050e77ad87865e381d9917da55a168
+FROM scratch AS audit_tools
+FROM ${UV_IMAGE} AS uv
+
+# --- 調査（取得元を APT スナップショットにして Ubuntu パッケージを入れ、wheel を解決・照合して入れ、足りない共有ライブラリの提供元を入れる）---
+FROM ${BASE_IMAGE} AS discovery
+ARG APT_SNAPSHOT=
+ENV UV_PYTHON_DOWNLOADS=never \
+    UV_NO_CACHE=1
+RUN --mount=type=bind,from=audit_tools,target=/opt/tools \
+    --mount=type=bind,source=.,target=/opt/audit \
+    --mount=type=tmpfs,target=/work \
+    --mount=type=bind,from=uv,source=/uv,target=/usr/local/bin/uv \
+    set -u; \
+    test -f /opt/tools/dependencies_inspect.py || exit 1; \
+    mkdir /report; \
+    export TMPDIR=/work APT_SNAPSHOT; \
+    dpkg-query -W -f='${Package}\t${Architecture}\t${Version}\t${db:Status-Status}\n' \
+        > /report/base-ubuntu.tsv; \
+    ( \
+        set -eu; \
+        apt-get -o Acquire::Retries=5 -o APT::Update::Error-Mode=any update; \
+        if [ -n "${APT_SNAPSHOT}" ]; then \
+            . /etc/os-release; \
+            test "$ID:$VERSION_ID" = ubuntu:24.04; \
+            work="$(mktemp -d /root/ca.XXXXXX)"; \
+            cd "$work"; \
+            apt-get download ca-certificates; \
+            dpkg-deb -x ca-certificates*.deb .; \
+            find usr/share/ca-certificates -name '*.crt' -exec cat {} + > /etc/apt/snapshot-ca.pem; \
+            cd /; \
+            rm -rf "$work"; \
+            mv /etc/apt/sources.list.d/ubuntu.sources /etc/apt/ubuntu.sources.original; \
+            sed "s|^URIs:.*|URIs: https://snapshot.ubuntu.com/ubuntu/$APT_SNAPSHOT/|; /^URIs:/a Check-Valid-Until: no" \
+                /etc/apt/ubuntu.sources.original > /etc/apt/sources.list.d/ubuntu.sources; \
+            printf 'Acquire::https::CaInfo "/etc/apt/snapshot-ca.pem";\n' > /etc/apt/apt.conf.d/99audit-snapshot; \
+            rm -rf /var/lib/apt/lists/*; \
+            apt-get -o Acquire::Retries=5 -o APT::Update::Error-Mode=any update; \
+        fi; \
+        sed 's/#.*//' /opt/audit/ubuntu-packages.txt \
+            | xargs -r apt-get -s --no-install-recommends install \
+            > /report/apt-plan.log; \
+        sed 's/#.*//' /opt/audit/ubuntu-packages.txt \
+            | xargs -r apt-get -o Acquire::Retries=5 install -y --no-install-recommends; \
+    ); \
+    ubuntu_status=$?; \
+    python_status=; \
+    if [ "$ubuntu_status" = 0 ]; then \
+        ( \
+            set -eu; \
+            uv venv /opt/python --python python3; \
+            /opt/python/bin/python -c 'import json, platform; print(json.dumps({"python_full_version": platform.python_version(), "platform_machine": platform.machine()}))' \
+                > /report/python-environment.json; \
+            resolve_status=0; \
+            uv pip compile --python /opt/python/bin/python \
+                --only-binary :all: --format pylock.toml --no-header \
+                -o /report/pylock.toml /opt/audit/requirements.txt \
+                > /report/uv-resolve.log 2>&1 \
+                || resolve_status=$?; \
+            cat /report/uv-resolve.log; \
+            printf '%s\n' "$resolve_status" > /report/resolve-status; \
+            : > /report/native-providers.txt; \
+            if [ "$resolve_status" = 0 ]; then \
+                uv pip sync --python /opt/python/bin/python --require-hashes /report/pylock.toml; \
+                /opt/python/bin/python /opt/tools/dependencies_inspect.py native \
+                    /opt/audit/ubuntu-packages.txt /report; \
+            fi; \
+        ); \
+        python_status=$?; \
+    fi; \
+    if [ "$python_status" = 0 ]; then \
+        ( \
+            set -eu; \
+            xargs -r apt-get -s --no-install-recommends install \
+                < /report/native-providers.txt \
+                > /report/apt-providers.log; \
+            xargs -r apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+                < /report/native-providers.txt; \
+        ); \
+        ubuntu_status=$?; \
+    fi; \
+    printf '%s\n' "$python_status" > /report/python-status; \
+    printf '%s\n' "$ubuntu_status" > /report/ubuntu-status; \
+    dpkg-query -W -f='${Package}\t${Architecture}\t${Version}\t${db:Status-Status}\n' \
+        > /report/installed-ubuntu.tsv
+FROM scratch AS dependency_report
+COPY --from=discovery /report/ /

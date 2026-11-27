@@ -1,0 +1,16 @@
+# --- 見本のプロジェクト example-r の設定（3 つの報告書が読む）（README.md「検査対象のフォルダ」）---
+experiment_name: example-r
+seed: 1
+project: example-r
+platform: linux/arm64
+discovery:
+  apt_snapshot: ""
+  review_notes: ""
+image:
+  dependency_lock: "outputs/evidence/20261127_070246_r-dependency-discovery_5995/confirm/dependency-lock.tsv"
+  image: ""
+  build: true
+  audit: true
+  save: true
+  sif: true
+  compare_to: ""

@@ -1,0 +1,17 @@
+language	operation	step	description
+r	resolve-r	discover	第 1 段階。調査の環境（R の子の Dockerfile.inspect）で、projects/<名前>/request の R の依存と Ubuntu の依存を調べる
+r	confirm-r	confirm	第 1 段階。R と Ubuntu の調査記録を照合し、採用する版を確定する
+r	build-r	build	第 2 段階。確定記録を照合し、人が書いた Dockerfile（projects/<名前>/dockerfile）でイメージをビルドする
+r	audit-r	audit	第 2 段階。イメージの中で R と Ubuntu の依存を調べ直し、確定記録と照合して監査する
+r	save-r	save	イメージを .tar で保存する
+r	audit-r-archive	audit-archive	保存した .tar から読み戻したイメージ（audit-readback/…）を、audit と同じ条件で監査する
+r	save-r-sif	sif	保存した .tar から Apptainer の SIF を作る
+r	audit-r-sif	audit-sif	作った SIF の中のファイルシステムを取り出してイメージ（audit-sif/…）にし、audit と同じ条件で監査する
+python	resolve-python	discover	第 1 段階。調査の環境（Python の子の Dockerfile.inspect）で、projects/<名前>/request の Python の依存と Ubuntu の依存を調べる
+python	confirm-python	confirm	第 1 段階。Python と Ubuntu の調査記録を照合し、採用する版を確定する
+python	build-python	build	第 2 段階。確定記録を照合し、人が書いた Dockerfile（projects/<名前>/dockerfile）でイメージをビルドする
+python	audit-python	audit	第 2 段階。イメージの中で Python と Ubuntu の依存を調べ直し、確定記録と照合して監査する
+python	save-python	save	イメージを .tar で保存する
+python	audit-python-archive	audit-archive	保存した .tar から読み戻したイメージ（audit-readback/…）を、audit と同じ条件で監査する
+python	save-python-sif	sif	保存した .tar から Apptainer の SIF を作る
+python	audit-python-sif	audit-sif	作った SIF の中のファイルシステムを取り出してイメージ（audit-sif/…）にし、audit と同じ条件で監査する

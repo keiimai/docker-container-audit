@@ -1,0 +1,198 @@
+#!/usr/bin/env bash
+# --- コミット前の検査（CHECKS.md 1 節）---
+
+# --- 未定義の変数で止め、パイプの途中の失敗もパイプの失敗にする（CHECKS.md 1 節）---
+set -uo pipefail
+
+# --- リポジトリの根に移る（CHECKS.md 1 節）---
+root="$(git rev-parse --show-toplevel)" || exit 1
+cd "$root" || exit 1
+
+# --- ステージされたものを見るか、追跡中の全ファイル（--all）を見るか（CHECKS.md 1 節）---
+mode=staged
+[ "${1:-}" = "--all" ] && mode=all
+
+# --- 指摘を集め、最後にまとめて止める（検査を飛ばしたことは、止めずに知らせる）（CHECKS.md 1 節）---
+fail=0
+ng() { printf '\033[31m[pre-commit]\033[0m %s\n' "$1" >&2; fail=1; }
+warn() { printf '\033[33m[pre-commit]\033[0m %s\n' "$1" >&2; }
+finish() {
+  if [ "$fail" -ne 0 ]; then
+    [ "$mode" = all ] && echo "[pre-commit] 追跡中のファイルに指摘があります。上の案内に従って直してください。" >&2 \
+      || echo "[pre-commit] コミットを止めました。上の指摘を直して、git add してからもう一度 commit してください。" >&2
+    exit 1
+  fi
+  exit 0
+}
+
+# --- 1. 根にある uv.lock がコミットに含まれているか（CHECKS.md 1 節）---
+if [ -f uv.lock ] && ! git ls-files --error-unmatch uv.lock >/dev/null 2>&1; then
+  ng "根に uv.lock がありますが、コミットに含まれていません。git add uv.lock してください（記録層は、このファイルでパッケージの版を確かめます）。"
+fi
+
+# --- 検査するファイルの一覧（CHECKS.md 1 節）---
+files=()
+if [ "$mode" = all ]; then
+  while IFS= read -r -d '' f; do files+=("$f"); done < <(git ls-files -z)
+else
+  while IFS= read -r -d '' f; do files+=("$f"); done \
+    < <(git diff --cached --name-only --diff-filter=ACMRT -z)
+fi
+if [ "${#files[@]}" -eq 0 ]; then
+  finish
+fi
+
+# --- 2. data/ 配下の実データ（CHECKS.md 1 節）---
+blocked=()
+for f in "${files[@]}"; do
+  case "$f" in
+    data/README.md | data/.gitkeep | data/*/.gitkeep) ;;
+    data/*) blocked+=("$f") ;;
+  esac
+done
+if [ "${#blocked[@]}" -gt 0 ]; then
+  ng "data/ 配下の実データが Git に入っています:"
+  printf '        %s\n' "${blocked[@]}" >&2
+  echo "        データ本体は追跡しません。run() の inputs に渡したファイルは、SHA-256 が実行の記録" >&2
+  echo "        （outputs/repro/<run_id>/<run_id>_run.json）に残ります。追跡から外すには（手元のファイルは消えない）:" >&2
+  printf '          git rm --cached' >&2
+  printf " '%s'" "${blocked[@]}" >&2
+  printf '\n' >&2
+fi
+
+# --- 3. outputs/・models/ 配下の成果物（CHECKS.md 1 節）---
+produced=()
+for f in "${files[@]}"; do
+  case "$f" in
+    outputs/.gitkeep | outputs/*/.gitkeep | models/.gitkeep) ;;
+    outputs/* | models/*) produced+=("$f") ;;
+  esac
+done
+if [ "${#produced[@]}" -gt 0 ]; then
+  ng "outputs/・models/ 配下の成果物が Git に入っています:"
+  printf '        %s\n' "${produced[@]}" >&2
+  echo "        成果物は追跡しません。state.artifacts に入れたファイルは、SHA-256 が実行の記録に残ります。追跡から外すには（手元のファイルは消えない）:" >&2
+  printf '          git rm --cached' >&2
+  printf " '%s'" "${produced[@]}" >&2
+  printf '\n' >&2
+fi
+
+# --- 4. 秘密情報を書く .env（CHECKS.md 1 節）---
+env_files=()
+for f in "${files[@]}"; do
+  case "${f##*/}" in
+    .env.example) ;;
+    .env | .env.* | *.env) env_files+=("$f") ;;
+  esac
+done
+if [ "${#env_files[@]}" -gt 0 ]; then
+  ng "秘密情報を書くファイル（.env）が Git に入っています:"
+  printf '        %s\n' "${env_files[@]}" >&2
+  echo "        .env は Git で追跡しません。追跡から外すには（手元のファイルは消えない）:" >&2
+  printf '          git rm --cached' >&2
+  printf " '%s'" "${env_files[@]}" >&2
+  printf '\n' >&2
+  echo "        push 済みなら、中のトークンやパスワードは漏れたものとして無効にしてください。" >&2
+fi
+
+# --- 5. data/ の外にある、データの形式のファイル（CHECKS.md 1 節）---
+data_extensions=" csv csv2 csvy tsv psv dat dif fwf rec mtp syd arff dbf dump xlsx xls xlsm xlsb xltx xltm ods fods numbers jmp sas7bdat xpt sav zsav por dta rds rda rdata qs2 fst feather parquet arrow pzfx mat wf1 pkl pickle joblib npy npz h5 hdf5 sqlite sqlite3 db accdb mdb zip gz gzip bz2 bzip2 tar tgz tbz2 "
+outside=()
+for f in "${files[@]}"; do
+  case "$f" in data/* | outputs/* | models/* | docs/definition/* | configs/* | tests/*) continue ;; esac
+  name="${f##*/}"
+  case "$name" in *.*) ;; *) continue ;; esac
+  extension="$(printf '%s' "${name##*.}" | tr '[:upper:]' '[:lower:]')"
+  case "$data_extensions" in *" ${extension} "*) outside+=("$f") ;; esac
+done
+if [ "${#outside[@]}" -gt 0 ]; then
+  ng "data/ の外に、データの形式のファイルがあります（置いてよいのは docs/definition/・configs/・tests/ だけ）:"
+  printf '        %s\n' "${outside[@]}" >&2
+  echo "        データは data/ に置きます（Git で追跡しない）。追跡から外すには（手元のファイルは消えない）:" >&2
+  printf '          git rm --cached' >&2
+  printf " '%s'" "${outside[@]}" >&2
+  printf '\n' >&2
+fi
+
+# --- 6. .gitignore が外すのに、git add -f で入れたファイル（CHECKS.md 1 節）---
+forced=()
+while IFS= read -r -d '' f; do
+  case "$f" in data/* | outputs/* | models/*) continue ;; esac
+  case "${f##*/}" in .env | .env.* | *.env) continue ;; esac
+  extension="$(printf '%s' "${f##*.}" | tr '[:upper:]' '[:lower:]')"
+  case "$data_extensions" in *" ${extension} "*) continue ;; esac
+  forced+=("$f")
+done < <(printf '%s\0' "${files[@]}" | git -c core.excludesFile=/dev/null check-ignore --no-index --stdin -z)
+if [ "${#forced[@]}" -gt 0 ]; then
+  ng ".gitignore が外しているファイルが、git add -f で Git に入っています:"
+  printf '        %s\n' "${forced[@]}" >&2
+  echo "        描画した文書と図・鍵・キャッシュなどは追跡しません。追跡から外すには（手元のファイルは消えない）:" >&2
+  printf '          git rm --cached' >&2
+  printf " '%s'" "${forced[@]}" >&2
+  printf '\n' >&2
+fi
+
+# --- 7. 大文字小文字だけが違うファイル名・フォルダ名（CHECKS.md 1 節）---
+dup="$(git ls-files -z | tr '\0' '\n' | awk -F/ '{p=$1; print p; for (i=2;i<=NF;i++) {p=p"/"$i; print p}}' | sort -u | tr '[:upper:]' '[:lower:]' | sort | uniq -d)"
+if [ -n "$dup" ]; then
+  ng "大文字小文字だけが違うファイル名・フォルダ名があります（macOS や Windows では同じ名前として衝突します）:"
+  printf '        %s\n' "$dup" >&2
+fi
+
+# --- 8. 衝突の印（マージ・rebase・cherry-pick・revert の途中だけ）（CHECKS.md 1 節）---
+in_conflict=0
+for state in MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD rebase-merge rebase-apply; do
+  [ -e "$(git rev-parse --git-path "$state")" ] && in_conflict=1
+done
+if [ "$in_conflict" -eq 1 ]; then
+  for f in "${files[@]}"; do
+    if git grep --cached -I -q -E '^(<{7} |={7}$|>{7} )' -- ":(literal)$f"; then
+      ng "$f: 衝突の印（<<<<<<< / ======= / >>>>>>>）が残っています"
+    fi
+  done
+fi
+
+# --- 9. pre-commit に index の写しを一時フォルダ（$TMPDIR）で渡す（CHECKS.md 1 節）---
+gitdir="$(git rev-parse --absolute-git-dir)" || exit 1
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/precommit.XXXXXX")" || exit 1
+trap 'rm -rf "$tmp"' EXIT
+index="${GIT_INDEX_FILE:-${gitdir}/index}"
+if ! cp "$index" "$tmp/index"; then
+  ng "index を写せませんでした（${index}）。検査できないので止めます。"
+  finish
+fi
+
+# --- pre-commit の引数（--all なら全ファイル）（CHECKS.md 1 節）---
+args=(run)
+[ "$mode" = all ] && args+=(--all-files)
+
+# --- マージの途中は、未ステージの変更があれば止め、マージで入るファイルをすべて渡す（CHECKS.md 1 節）---
+if [ "$mode" = staged ] && [ -e "$(git rev-parse --git-path MERGE_HEAD)" ]; then
+  git diff --quiet -- "${files[@]}" || { ng "マージの途中は、未ステージの変更を git add するか戻してから commit してください（検査はステージした内容を見るため）"; finish; }
+  args+=(--files "${files[@]}")
+fi
+
+# --- pre-commit は、手元のものを使う（探す場所を PATH に足し、無ければ Python のモジュールを探す）（CHECKS.md 1 節）---
+PATH="$PATH:$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin"
+precommit=()
+if command -v pre-commit >/dev/null 2>&1; then
+  precommit=(pre-commit)
+else
+  for python in python3 python; do
+    if command -v "$python" >/dev/null 2>&1 && "$python" -c "import pre_commit" >/dev/null 2>&1; then
+      precommit=("$python" -m pre_commit)
+      break
+    fi
+  done
+fi
+
+# --- pre-commit が無ければ、その検査を飛ばして知らせる（上の検査の指摘は、そのまま止める）（CHECKS.md 1 節）---
+if [ "${#precommit[@]}" -eq 0 ]; then
+  warn "pre-commit が見つからないので、pre-commit の検査（2 MB を超えるファイル・秘密鍵・トークン・秘密情報らしい値・構文・行末・ノートブックの出力）を飛ばしました。"
+else
+  GIT_INDEX_FILE="$tmp/index" PRE_COMMIT_HOME="${gitdir}/pre-commit-cache/$(uname -m)" \
+    "${precommit[@]}" "${args[@]}" || fail=1
+fi
+
+# --- 指摘があればコミットを止める（CHECKS.md 1 節）---
+finish

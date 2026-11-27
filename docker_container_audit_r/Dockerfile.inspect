@@ -1,0 +1,49 @@
+# syntax=docker/dockerfile:1.29.0@sha256:572cebbc2b15e6f84c077742952674889cb63cd5e9b80abdffcbe587b6f19183
+# check=skip=InvalidDefaultArgInFrom
+
+# --- 第 1 段階で使う R の調査の環境（README.md「第 1 段階の中身」）---
+# --- 固定ベースの指定（初めの値は置かない）と、調べるスクリプトの受け口 audit_tools ---
+ARG BASE_IMAGE
+FROM scratch AS audit_tools
+
+# --- 調査（R の依存と共有ライブラリを調べ、通れば取得元を APT スナップショットにして Ubuntu の依存を入れる）---
+FROM ${BASE_IMAGE} AS discovery
+ARG RSTUDIO_TAG
+ARG RSTUDIO_SHA256
+ARG R_REPOSITORY=
+ARG APT_SNAPSHOT=
+ENV RSTUDIO_TAG=${RSTUDIO_TAG} \
+    RSTUDIO_SHA256=${RSTUDIO_SHA256} \
+    LC_ALL=C.UTF-8
+RUN --mount=type=bind,from=audit_tools,target=/opt/tools \
+    --mount=type=bind,source=.,target=/opt/audit \
+    --mount=type=tmpfs,target=/work \
+    set -u; \
+    test -f /opt/tools/dependencies-inspect.R || exit 1; \
+    mkdir /report; \
+    export TMPDIR=/work R_REPOSITORY APT_SNAPSHOT; \
+    r_status=0; \
+    Rscript --vanilla /opt/tools/dependencies-inspect.R r \
+        $(sed 's/#.*//' /opt/audit/packages.txt) \
+        || r_status=$?; \
+    printf '%s\n' "$r_status" > /report/r-status; \
+    ubuntu_status=; \
+    if [ "$r_status" = 0 ]; then \
+        ( \
+            set -eu; \
+            if [ -n "${APT_SNAPSHOT}" ]; then \
+                . /etc/os-release; \
+                test "$ID:$VERSION_ID" = ubuntu:24.04; \
+                mv /etc/apt/sources.list.d/ubuntu.sources /etc/apt/ubuntu.sources.original; \
+                sed "s|^URIs:.*|URIs: https://snapshot.ubuntu.com/ubuntu/$APT_SNAPSHOT/|; /^URIs:/a Check-Valid-Until: no" \
+                    /etc/apt/ubuntu.sources.original > /etc/apt/sources.list.d/ubuntu.sources; \
+                rm -rf /var/lib/apt/lists/*; \
+            fi; \
+            Rscript --vanilla /opt/tools/dependencies-inspect.R ubuntu \
+                $(sed 's/#.*//' /opt/audit/ubuntu-packages.txt); \
+        ); \
+        ubuntu_status=$?; \
+    fi; \
+    printf '%s\n' "$ubuntu_status" > /report/ubuntu-status
+FROM scratch AS dependency_report
+COPY --from=discovery /report/ /

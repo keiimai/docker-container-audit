@@ -1,0 +1,4 @@
+# --- R の検査用のビルドに送るファイル（固定した版と SHA-256 の表と、それを入れるスクリプト）---
+*
+!renv-pins.tsv
+!tools/install-r-packages.R

@@ -1,0 +1,13 @@
+# --- ruff（lint と整形）の決まり（CHECKS.md 2 節）---
+line-length = 100
+src = ["src", "tests"]
+extend-exclude = ["notebooks", "data", "models", "outputs"]
+
+# --- lint で見る規則（1 行の長さは、整形に任せる）（CHECKS.md 2 節）---
+[lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "N", "NPY", "PD"]
+ignore = ["E501"]
+
+# --- 整形（docstring の中のコードも整える）（CHECKS.md 2 節）---
+[format]
+docstring-code-format = true

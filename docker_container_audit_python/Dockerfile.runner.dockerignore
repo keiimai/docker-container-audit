@@ -1,0 +1,5 @@
+# --- Python の検査用のビルドに送るファイル（操作側の Python の版の一覧だけ）---
+*
+!pyproject.toml
+!uv.lock
+!.python-version

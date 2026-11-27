@@ -1,0 +1,27 @@
+check	language	meaning
+OS (Debian/Ubuntu)	common	イメージの OS が Debian か Ubuntu か（合格のときは OS の名前を detail に出す）
+Shared libraries	common	言語のパッケージの共有ライブラリが読み込むライブラリが、すべてイメージの中で見つかるか（イメージと違う機械用のファイルは調べず、詳細欄に書く）
+Quarto CLI	common	報告書を作る Quarto の CLI が動くか（版を詳細に書く。見つからなければ REVIEW、quarto --version が失敗すれば FAIL）
+APT consistency	common	APT から見て、入っている Ubuntu パッケージの依存が壊れていないか（apt-get check）
+dpkg audit	common	導入が途中で止まった Ubuntu パッケージが無いか（dpkg --audit）
+Ubuntu package inventory	common	入っている Ubuntu パッケージの一覧を読めたか
+Base OS packages removed or changed	common	確定記録の固定ベースに入っていた Ubuntu パッケージが消えたり版が変わったりしていないか（確定記録で根拠を付けて確定した更新は除く）
+Confirmed Ubuntu versions	common	確定記録のとおりの版の Ubuntu パッケージが入っているか
+Unlisted Ubuntu additions	common	確定記録に無い Ubuntu パッケージが増えていないか（増えていれば REVIEW。足りない・版が違うものは Confirmed Ubuntu versions で FAIL）
+Confirmed Ubuntu additions missing or ambiguous	common	確定記録で足すと決めた Ubuntu パッケージが、欠けたり重なったりしていないか
+DESCRIPTION requirements	r	確定記録の DESCRIPTION に書いた R パッケージと R の版の条件を満たすか
+Missing R dependencies	r	使う R パッケージが依存する R パッケージに、入っていないものが無いか
+R dependency version constraints	r	R パッケージどうしの版の条件（Depends・Imports・LinkingTo）を満たすか
+R namespace loading	r	使う R パッケージとその依存を、すべて読み込めるか
+Base R packages removed or changed	r	確定記録の固定ベースに入っていた R パッケージが消えたり版が変わったりしていないか
+Confirmed R versions	r	確定記録のとおりの版の R パッケージが入っているか
+Unlisted R additions	r	確定記録に無い R パッケージが増えていないか（増えていれば REVIEW。足りない・版が違うものは Confirmed R versions で FAIL）
+Confirmed R package hashes	r	ビルドの導入記録（R.home() の r-install-report.tsv）があれば、入れたアーカイブが確定記録の版と SHA-256 に一致するか（導入記録が無ければ REVIEW）
+Confirmed R runtime version	r	確定記録のとおりの R の版か
+uv pip check	python	Python の配布物どうしの依存が壊れていないか（uv pip check）
+Python requirements.txt	python	確定記録の requirements.txt の要件を満たすか（uv の、ネットワークを使わない試算で何も入れ替えないか）
+Python module import	python	入っている配布物の最上位のモジュールを、すべて読み込めるか（pip・setuptools・wheel は除く）
+Confirmed Python versions	python	確定記録のとおりの版の Python の配布物が入っているか
+Unlisted Python additions	python	確定記録に無い Python の配布物が増えていないか（増えていれば REVIEW。足りない・版が違うものは Confirmed Python versions で FAIL）
+Confirmed Python runtime version	python	確定記録のとおりの Python の版か
+Confirmed Python wheel hashes	python	イメージに残した pylock.toml があれば、確定記録の pylock.toml（wheel ごとの SHA-256）と一致するか（残していなければ REVIEW）

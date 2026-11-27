@@ -1,0 +1,118 @@
+---
+title: "R の Dockerfile の生成（第 2 段階）"
+format: html
+params:
+  project: "example-r"
+execute:
+  cache: false
+---
+
+第 2 段階では、第 1 段階で確定した依存の記録から、第 3 段階で使う Dockerfile とビルド用ファイルをそろえます。
+
+# この報告書の読み方
+
+::: {.callout-note}
+[生成したファイル](#result-generated-files) の表で、`projects/<名前>/dockerfile/` にそろったファイルと SHA-256 を確認します。第 3 段階で使うのは、このフォルダと今回指定した確定記録です。
+
+照合や生成の途中でエラーが出ると描画を中断します。その場合は実行時のエラーと、実行記録が作られていればその内容を確認します。
+:::
+
+## 生成までにやること
+
+| 作業 | 確かめることと結果 |
+|---|---|
+| 確定記録と入力を照合する | 確定記録の言語、プラットフォーム、ファイルの SHA-256 を照合する。現在の `request/` が調査時と同じかも確かめる。 |
+| ビルド用ファイルを作る | 固定ベースやスナップショット時点を Dockerfile に差し込み、確定した版の一覧などをそろえる。 |
+| 照合して保存する | 保存前に確定記録や入力が変わっていないことを確かめ、ファイルを配置する。配置したファイルの SHA-256 を報告書と実行記録に残す。 |
+
+## 実行と出力
+
+`project` で対象を選びます。既定は `example-r` です。第 1 段階の表 `dockerfile-inputs` に出た `dependency_lock` を、`projects/<名前>/config.yaml` の `image.dependency_lock` に設定します。内容の異なる同名ファイルを意図して置き換えるときは、同じ設定ファイルで `dockerfile.replace` を `true` にします。
+
+R 側のプロジェクトのルートから `bash tools/runner.sh render notebooks/r-dockerfile-generate.qmd project:<名前>` を実行します。
+
+| 探すもの | 保存先 |
+|---|---|
+| ビルド用ファイル | `projects/<名前>/dockerfile/` |
+| HTML 報告書 | `outputs/reports/<ID>/` |
+| 実行記録と設定の写し | `outputs/repro/<ID>/` |
+
+`<ID>` は報告書の題名の下に出る実行 ID です。
+
+```{r}
+#| label: setup
+#| include: false
+root <- normalizePath(getwd(), mustWork = TRUE)
+while (!file.exists(file.path(root, "R", "generate-dockerfile.R"))) {
+  parent <- dirname(root)
+  if (identical(parent, root)) stop("プロジェクトのルートを特定できません。")
+  root <- parent
+}
+if (!identical(Sys.getenv("AUDIT_RUNNER"), "r")) {
+  stop("R の検査用の中で描いてください（README.md「第 2 段階の中身」）。")
+}
+knitr::opts_knit$set(root.dir = root)
+```
+
+```{r}
+#| label: generate
+#| include: false
+for (path in list.files("R", pattern = "[.][Rr]$", full.names = TRUE)) {
+  source(path, local = knitr::knit_global())
+}
+audit_setup(knitr::knit_global())
+project <- params$project
+cfg <- load_project_config(project)
+lock <- required_lock(config_text(cfg$image$dependency_lock, "image.dependency_lock"))
+paths <- project_paths(project)
+settings <- cfg$dockerfile
+inputs <- c(file.path(paths$root, "config.yaml"), unname(target_inputs(paths$request)),
+            lock_inputs(lock), "../contracts/lock-files.tsv",
+            "../contracts/build-environment.schema.json", "notebooks/r-dockerfile-generate.qmd",
+            "R/container.R", "R/contract.R", "R/discovery.R", "R/evidence.R",
+            "R/generate-dockerfile.R", "R/image.R", "R/project.R", "R/repro.R",
+            "dockerfile-templates/Dockerfile.generate",
+            "tools/install-locked-r-dependencies.R", "../tools/publish-dockerfile.sh")
+repro_set_seed(cfg$seed)
+state <- repro_run(cfg, inputs = vapply(inputs, shown_path, character(1), USE.NAMES = FALSE))
+state$ledger <- list(project = project, stage = "dockerfile", dependency_lock = shown_path(lock))
+tryCatch({
+  if (!is.null(settings) && (!is.list(settings) || is.null(names(settings)))) {
+    stop("設定ファイルの dockerfile はキーと値の組にしてください。", call. = FALSE)
+  }
+  replace <- config_flag(settings$replace %||% FALSE, "dockerfile.replace")
+  destination <- generate_r_dockerfile(project, replace = replace)
+  files <- file.path(destination, c("Dockerfile", "ubuntu-pins.txt", "r-pins.tsv",
+                                    "install-dependencies.R"))
+  state$artifacts <- files
+  generated <- data.frame(path = vapply(files, shown_path, character(1)),
+                          sha256 = vapply(files, file_sha256, character(1)))
+  repro_finish(state)
+}, error = function(error) {
+  repro_fail(state, error)
+  stop(error)
+})
+```
+
+報告書の ID は `r state$run_id`、プロジェクトは `r project` です。
+
+# 生成したファイル {#result-generated-files}
+
+「ファイル」は R 側のプロジェクトのルートからのパス、「SHA-256」は配置したファイルのハッシュです。同じファイルかを確認するときは、パスとハッシュを照合します。
+
+| ファイル | ビルドでの役割 |
+|---|---|
+| `Dockerfile` | 固定ベースと取得元を指定し、確定した依存を導入するための手順。 |
+| `ubuntu-pins.txt` | 確定した Ubuntu パッケージの版の一覧。 |
+| `r-pins.tsv` | 取得する R パッケージの版とアーカイブの SHA-256。 |
+| `install-dependencies.R` | R パッケージを一覧の SHA-256 と照合して導入するスクリプト。 |
+
+```{r}
+#| label: generated-files
+#| echo: false
+knitr::kable(generated, col.names = c("ファイル", "SHA-256"))
+```
+
+# 第 3 段階に渡すもの
+
+同じプロジェクト、同じ `image.dependency_lock` を指定し、生成した `dockerfile/` 一式を使って第 3 段階の報告書（`r-image-build.qmd`）を描画します。

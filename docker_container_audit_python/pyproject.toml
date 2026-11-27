@@ -1,0 +1,26 @@
+# --- 操作側（記録層・Docker 操作・Quarto 報告書）の Python 環境の定義（版は uv.lock に固定）---
+[project]
+name = "docker-container-audit"
+version = "0.1.0"
+description = "Operator environment for auditing R/Python and Ubuntu dependencies of Docker images"
+requires-python = "==3.12.*"
+dependencies = [
+    "numpy",
+    "PyYAML",
+    "threadpoolctl",
+    "packaging",
+    "ipykernel",
+    "nbclient",
+    "nbformat",
+    "papermill",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "ruff",
+    "jsonschema",
+]
+
+[tool.uv]
+package = false

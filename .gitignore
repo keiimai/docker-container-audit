@@ -1,0 +1,18 @@
+# --- 親（git の根）で Git に載せないもの（README.md「構成」）---
+# 2 つの子（docker_container_audit_r/・docker_container_audit_python/）のデータや生成物は、それぞれの子の .gitignore（骨格のまま）が決める。
+# ここに書いた名前は子の中にも効くので、子の .gitignore と同じ向きのもの（載せない）だけを書く。
+
+# --- 秘密情報（親の直下は、コミット前の検査が見ないため。名前は骨格と同じ）---
+.env
+.env.*
+*.pem
+*.key
+secrets.yaml
+secrets.yml
+
+# --- 作業フォルダ・OS とエディタが作るファイル ---
+/_tmp/
+/.quarto/
+/.vscode/
+.DS_Store
+*.swp

@@ -1,0 +1,12 @@
+xgboost
+pyodbc
+pyyaml
+threadpoolctl
+jupyterlab
+ipykernel
+pytest
+ruff
+pre-commit
+nbstripout
+optuna
+matplotlib

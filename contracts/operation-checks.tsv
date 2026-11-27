@@ -1,0 +1,35 @@
+operation	check	language	meaning
+discover	R dependency resolution	r	固定ベースと P3M の取得元で、R パッケージの依存と版を決め、共有ライブラリを調べられたか（コンテナの中で調べる）
+discover	DESCRIPTION requirements	r	DESCRIPTION の版条件を満たす候補があるか
+discover	Python dependency resolution	python	要件を、対象のプラットフォームの wheel で解決できたか（wheel が無い要件があれば REVIEW）
+discover	Python requirements	python	requirements.txt の要件を、解決した版（pylock.toml）が満たすか（R の DESCRIPTION requirements と同じ）
+discover	Ubuntu dependency plan	common	共有ライブラリの提供元を割り出し、Ubuntu パッケージの導入を試算できたか（詳細は維持・追加・更新・要確認の数。要確認があれば REVIEW）
+discover	Build inputs unchanged	common	調査の間に、第 1 段階の入力（projects/<名前>/request）が変わっていないか
+confirm	Discovery platform	common	確定するプラットフォームが、調査の記録と同じか
+confirm	Discovery unchanged	common	調査のあとで、入力と調査の記録が変わっていないか（調査の build-environment.json のハッシュと照合する）
+confirm	Discovery completed	r	調査の記録の判定が、確定できるもの（R の依存は PASS、Ubuntu の依存と、ほかの照合は PASS か REVIEW）か
+confirm	Resolution architecture	python	uv の解決が、対象のプラットフォームの機械で行われたか
+confirm	DESCRIPTION requirements	r	DESCRIPTION と調査の結果の、対象と版条件が一致するか
+confirm	Python requirements	python	requirements.txt の要件を、解決した版（pylock.toml）が満たすか（R の DESCRIPTION requirements と同じ）
+confirm	Pinned package hashes	common	固定する言語のパッケージのすべてに、照合できる SHA-256 があるか（R は無ければ止め、Python は要確認にする）
+confirm	Review notes	common	確認根拠の TSV が、要確認項目と一致するか（指定したときだけ）
+confirm	Review items resolved	common	要確認項目が、すべて確認根拠で確定したか（残れば REVIEW。詳細は残りの数）
+build	Dependency lock	common	確定記録（第 1 段階）のファイルのハッシュ・形・言語・プラットフォームを照合できたか（確定記録の中だけで照合する）
+build	Image build	common	人が書いた Dockerfile のフォルダをビルドコンテキストにして、docker buildx build が成功したか
+build	Dependency lock after build	common	ビルドの後も、確定記録が変わっていないか
+build	Image platform	common	できたイメージが、指定したプラットフォームを含むか（詳細はイメージ ID）
+audit	SIF unchanged	common	監査する SIF の SHA-256 が、sif の工程が sif.tsv に残した値と同じか（SIF を監査するときだけ）
+audit	SIF file system extracted	common	Apptainer（contracts/apptainer-images.tsv）のイメージの中で、SIF の中のファイルシステムを取り出せたか（contracts/sif-extract.sh。apptainer sif dump と unsquashfs で、Docker のボリュームの中に取り出す。SIF を監査するときだけ）
+audit	SIF image imported	common	取り出したファイルシステムを、元のイメージの設定（Env・WorkingDir・User）を付けて docker import で audit-sif/<イメージ>:<アーキテクチャ> にでき、指定したプラットフォームか（詳細はイメージ ID。SIF を監査するときだけ）
+audit	Dependency lock	common	確定記録（第 1 段階）のファイルのハッシュ・形・言語・プラットフォームを照合できたか（確定記録の中だけで照合する）
+audit	Base inventory	common	比べる固定ベースの Ubuntu パッケージの一覧を用意できたか（確定記録の一覧を使う。詳細は固定ベースと数）
+audit	Audit checks	common	イメージの中の監査が終わったか（判定は項目のうち最も悪いもの。詳細は判定ごとの数。項目ごとの判定は audit-checks.tsv）
+save	Image platform	common	保存するイメージが、指定したプラットフォームを含むか（詳細はイメージ ID）
+save	Image unchanged during save	common	保存の前後で、タグの指すイメージ ID が同じか
+save	Archive written	common	空でない .tar を保存できたか（詳細は大きさと SHA-256。archive.tsv にも書く）
+save	Archive loads back	common	保存した .tar を別の名前（audit-readback/<イメージ>:<アーキテクチャ>）で docker load で読み戻し、元のイメージのそのプラットフォームの分とイメージ ID と層が同じか（元のタグには触れない）
+sif	Archive entries safe	common	.tar に、外へ書く名前（絶対パス・..）とリンクが無いか
+sif	Archive platform image	common	.tar の目次に、指定したプラットフォームのイメージがちょうど 1 つあるか（詳細は manifest のダイジェスト）
+sif	SIF build	common	apptainer build が成功したか
+sif	SIF file system architecture	common	apptainer sif list で、SIF のファイルシステムが指定したアーキテクチャか（詳細はその行）
+sif	SIF written	common	空でない SIF を作れたか（詳細は大きさと SHA-256。sif.tsv にも書く）

@@ -1,0 +1,107 @@
+# --- Git で追跡しないもの（README.md「構成」）---
+
+# --- 秘密情報（README.md「構成」）---
+.env.*
+*.env
+!.env.example
+*.pem
+*.key
+secrets.yaml
+secrets.yml
+
+# --- データ（.gitkeep と README.md だけを残す）（README.md「構成」）---
+data/**
+!data/**/
+!data/**/.gitkeep
+!data/README.md
+
+# --- 成果物（.gitkeep だけを残す）（README.md「構成」）---
+models/**
+!models/.gitkeep
+outputs/**
+!outputs/**/
+!outputs/**/.gitkeep
+
+# --- notebooks/ で描画した文書と、描画の作業フォルダ（README.md「構成」）---
+notebooks/**/*.html
+notebooks/**/*.pdf
+notebooks/**/*.tex
+notebooks/**/*_files/
+notebooks/**/.quarto
+*.quarto_ipynb
+notebooks/**/.gitignore
+
+# --- render() が実行させる、ノートブックの隠した写し（README.md「構成」）---
+notebooks/**/.*.ipynb
+
+# --- Word の文書（README.md「構成」）---
+*.docx
+
+# --- 生データの拡張子（README.md「構成」）---
+*.sav
+*.zsav
+*.por
+*.rds
+*.rda
+*.RData
+*.fst
+*.qs2
+*.dta
+*.sas7bdat
+*.xpt
+*.parquet
+*.feather
+*.arrow
+*.xlsx
+*.xls
+*.xlsm
+*.dbf
+*.accdb
+*.mdb
+*.sqlite
+*.sqlite3
+*.db
+*.db-wal
+*.db-shm
+*.csv
+*.tsv
+*.pkl
+*.pickle
+*.joblib
+*.np[yz]
+*.h5
+*.hdf5
+
+# --- 例外: 再現性の証拠として追跡するもの（README.md「構成」）---
+!docs/definition/*.csv
+
+# --- 音声と動画の拡張子（README.md「構成」）---
+*.m4a
+*.mp4
+*.wav
+*.mp3
+*.flac
+*.aac
+*.ogg
+*.mov
+*.mkv
+*.webm
+*.aiff
+*.aif
+
+# --- Python 環境（README.md「構成」）---
+.venv/
+__pycache__/
+
+# --- ツールのキャッシュ（README.md「構成」）---
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# --- エディタ / OS（README.md「構成」）---
+.vscode/
+.idea/
+.claude/
+.DS_Store
+*.swp

@@ -1,0 +1,353 @@
+---
+title: "Python のイメージのビルドと監査（第 3 段階）"
+format: html
+jupyter: python3
+execute:
+  cache: false
+  daemon: false
+---
+
+第 3 段階では、第 2 段階でそろえた Dockerfile からイメージを作り、第 1 段階の確定記録と照合します。設定に応じて Docker の保存ファイル（`.tar`）と Apptainer の SIF を作り、それぞれの中身も監査します。
+
+# この報告書の読み方
+
+::: {.callout-note}
+まず [工程ごとの判定](#result-steps) で、今回実行する予定の工程の `status` を見ます。気になる判定は `detail` を読み、[工程の照合](#result-operation-checks) か各監査の表で理由を確認します。
+
+保存ファイルを探すときは [保存・読み戻し・SIF の作成](#result-save) の `image-files` を見ます。題名の下にある実行 ID を、保存先の `<ID>` に当てはめてください。
+:::
+
+## 各工程でやること
+
+| 工程 | 実行する条件 | することと `PASS` になる条件 |
+|---|---|---|
+| [ビルド](#result-build-audit)（`build`） | `image.build` が有効。 | 確定記録を照合し、`dockerfile/` を使って指定のプラットフォームのイメージをビルドする。 |
+| [イメージの監査](#result-build-audit)（`audit`） | `image.audit` が有効。ビルドも有効なら `build` の `PASS` が必要。 | Python と Ubuntu の依存、共有ライブラリなどを調べ、すべての監査項目が合格する。 |
+| [保存と読み戻し](#result-save)（`save`） | `image.save` が有効で、`audit` が `PASS` または `REVIEW`。 | `.tar` に保存して別名で読み戻し、元のイメージと ID・層が一致することを確かめる。 |
+| [読み戻したイメージの監査](#result-save)（`audit-archive`） | `save` が `PASS` で、監査が有効。 | 読み戻したイメージのすべての監査項目が合格する。 |
+| [SIF の作成](#result-save)（`sif`） | `save` が `PASS` で、`image.sif` が有効。 | `.tar` から SIF を作り、ファイルシステムが指定したアーキテクチャであることを確かめる。 |
+| [SIF の監査](#result-sif-audit)（`audit-sif`） | `sif` が `PASS` で、監査が有効。 | SIF から復元したイメージのすべての監査項目が合格する。 |
+
+| 判定 | 読み方 |
+|---|---|
+| `PASS` | 工程を完了し、その工程の照合条件を満たしました。 |
+| `REVIEW` | 確認が必要な項目があります。`detail` で理由を確認します。 |
+| `FAIL` | 工程の処理または照合に失敗しました。`detail` と工程のログを確認します。 |
+| `NOT_RUN` | 設定で省いたか、開始に必要な先行工程の結果が得られず、実行していません。 |
+
+## 実行と出力
+
+`project` で対象を選びます。既定は `example-python` です。`projects/<名前>/config.yaml` の `image.dependency_lock` には第 2 段階と同じ確定記録を指定します。ビルドする場合は `projects/<名前>/dockerfile/` に第 2 段階のファイルをそろえます。
+
+`image.image` はイメージ名で、省略すると `<名前>:local` です。既存イメージを監査する場合はその名前を指定し、`image.build` を `false` にします。工程の有効・無効や、比較元の実行 ID（`image.compare_to`）も同じ設定ファイルに書きます。
+
+Docker とネットワークに接続できる環境で、Python 側のプロジェクトのルートから `bash tools/runner.sh render notebooks/python-image-build.qmd project:<名前>` を実行します。
+
+| 探すもの | 保存先 |
+|---|---|
+| HTML 報告書 | `outputs/reports/<ID>/` |
+| 判定表 `steps.csv` と各結果表 | `outputs/tables/<ID>/` |
+| 詳細な照合結果とログ | `outputs/evidence/<ID>/<工程>/` |
+| 保存された `.tar` と SIF | `outputs/images/<ID>/` |
+| 実行記録と設定の写し | `outputs/repro/<ID>/` |
+
+```{python}
+#| tags: [parameters]
+project = "example-python"
+```
+
+```{python}
+#| label: setup
+#| include: false
+NOTEBOOK = "notebooks/python-image-build.qmd"
+import json
+import contextlib
+import os
+from pathlib import Path
+import sys
+
+from IPython.display import Markdown, display
+
+root = Path.cwd().resolve()
+while not (root / "src" / "project.py").is_file():
+    if root.parent == root:
+        raise RuntimeError("プロジェクトのルートを特定できません。")
+    root = root.parent
+# --- Python の検査用（Dockerfile.runner）の /opt/venv の中でなければ止める ---
+environment = Path(os.getenv("UV_PROJECT_ENVIRONMENT") or root / ".venv")
+if os.getenv("AUDIT_RUNNER") != "python" or Path(sys.prefix).resolve() != environment.resolve():
+    raise RuntimeError(
+        f"Python の検査用の中で描いてください（いまは {sys.executable}）。"
+        f"`bash tools/runner.sh render {NOTEBOOK} project:<名前>`（子の根で）"
+        "を実行します（README.md「本番の手順」）。"
+    )
+sys.path.insert(0, str(root / "src"))
+import repro
+import evidence
+import archive as archive_ops
+import contract
+import image as image_ops
+import project as project_config
+
+# --- 設定を projects/<project>/config.yaml から読む ---
+cfg = project_config.load_project_config(project, stage="image")
+repro.set_seed(cfg["seed"])
+platform = cfg["platform"]
+session = evidence.report_session(root, display, Markdown)
+
+# --- 工程の外で止まったら、記録を failed にしてから止める ---
+@contextlib.contextmanager
+def stop_on_error():
+    try:
+        yield
+    except BaseException as error:
+        repro.fail(state, error)
+        raise
+
+from dependencies_compare import compare_dependencies
+
+image_settings = cfg.get("image") or {}
+# --- 第 1 段階の確定記録が無ければ止める ---
+if not image_settings.get("dependency_lock"):
+    raise RuntimeError(
+        f"確定記録を projects/{project}/config.yaml の image.dependency_lock に書いてください。"
+        "第 1 段階の報告書（python-dependency-discovery.qmd）の表 dockerfile-inputs の dependency_lock に出る "
+        "dependency-lock.tsv のパス（根から）を書きます。"
+    )
+lock = root / image_settings["dependency_lock"]
+# --- イメージの名前（省けば <プロジェクト名>:local）---
+image = image_settings.get("image") or project_config.default_image(project)
+build, audit, save, sif = (image_settings.get(name, True) is True for name in ("build", "audit", "save", "sif"))
+compare_to = image_settings.get("compare_to") or ""
+```
+
+```{python}
+#| label: begin
+#| include: false
+# --- 記録を始める（実行 ID は runner.sh render が渡す REPRO_RUN_ID）---
+record_inputs = [*project_config.report_inputs(project, "image", lock), "notebooks/python-image-build.qmd"]
+state = repro.run(cfg, inputs=record_inputs)
+report_id = state.run_id
+with stop_on_error():
+    session.begin(report_id)
+```
+
+報告書の ID は `{python} report_id`、プロジェクトは `{python} project`、イメージは `{python} image`、プラットフォームは `{python} platform`、確定記録は `{python} str(lock)` です。
+
+# ビルドとイメージの監査（build・audit） {#result-build-audit}
+
+**ビルド（`build`）**では、確定記録にあるファイルの SHA-256、言語、プラットフォームを照合してから `docker buildx build` を実行します。`--build-arg` は渡さず、Dockerfile の設定を使います。ビルド後に確定記録が変わっていないことと、イメージのプラットフォームを確かめます。入力ファイルの SHA-256 は、工程の証跡の `inputs.tsv` で確認できます。
+
+**監査（`audit`）**はネットワークを切ったコンテナで行います。確定記録の `requirements.txt` にある版の条件、モジュールの読み込み、`uv pip check` による依存の整合を調べます。イメージに残した `pylock.toml` があれば、配布物の版と wheel の SHA-256 を確定記録と照合します。ハッシュを照合するための記録がなければ、その照合は `REVIEW` です。
+
+共有ライブラリの読み込み、APT と dpkg の整合、Ubuntu パッケージの版と固定ベースとの差も確認します。確定したパッケージが足りないか版が違えば `FAIL`、確定記録にないパッケージが増えていれば `REVIEW` です。
+
+| 表 | 見るところ |
+|---|---|
+| `audit-checks` | 検査名（`check`）、判定（`status`）、理由や件数（`detail`）。 |
+| `audit-items` | 個々の照合対象と `expected`（期待値）、`found`（実際の値）、`status`（判定）。 |
+| `installed-packages` | イメージに入っている Python と Ubuntu パッケージの名前と版。 |
+| `audit-native-libraries` | 読み込み元のファイル（`file`）、ライブラリ名（`soname`）、見つかった場所（`path`）、提供元（`owners`）。 |
+
+```{python}
+#| label: build
+#| echo: false
+with stop_on_error():
+    built = None
+    if build:
+        built = session.run_step("build", lambda run_id: image_ops.build_python_image(
+            image, project, platform, lock=lock, run_id=run_id,
+        ))
+    else:
+        session.run_step("build")
+```
+
+```{python}
+#| label: audit
+#| echo: false
+with stop_on_error():
+    audit_result = None
+    if audit and (not build or built):
+        audit_result = session.run_step("audit", lambda run_id: archive_ops.audit_python_image(
+            image, platform, lock=lock, run_id=run_id,
+        ))
+    else:
+        session.run_step("audit", detail="ビルドが済んでいないため、監査していません。" if audit else "")
+
+    if audit_result:
+        report = Path(audit_result["report"])
+        summary = report.with_name("audit-checks.tsv")
+        if summary.is_file():
+            checks = session.read_tsv(summary)
+            session.show_table("audit-checks", checks)
+            meanings = {row["check"]: row["meaning"] for row in contract.read_tsv("audit-checks.tsv")}
+            display(Markdown("各項目の意味\n\n" + "\n".join(
+                f"- `{row['check']}`：{meanings.get(row['check'], '')}" for row in checks
+            )))
+        audit_items = report.with_name("audit-items.tsv")
+        if audit_items.is_file():
+            session.show_table("audit-items", session.read_tsv(audit_items))
+        inventory = report.with_name("installed-packages.tsv")
+        if inventory.is_file():
+            session.show_table("installed-packages", session.read_tsv(inventory))
+        libraries = report.with_name("native-libraries.tsv")
+        if libraries.is_file():
+            session.show_table("audit-native-libraries", session.read_tsv(libraries))
+```
+
+# 保存・読み戻し・SIF の作成（save・audit-archive・sif） {#result-save}
+
+**保存と読み戻し（`save`）**では、監査が `PASS` または `REVIEW` のイメージを `.tar` に保存し、`audit-readback/<イメージ>:<アーキテクチャ>` として読み戻します。保存ファイルが空でなく、読み戻したイメージの ID と層が、元のイメージの対象プラットフォームのものと一致するかを確認します。
+
+**読み戻したイメージの監査（`audit-archive`）**では、保存に成功したイメージを同じ確定記録で再監査します。`archive-audit-checks` で項目ごとの判定、`archive-audit-items` で個々の照合結果を読みます。
+
+**SIF の作成（`sif`）**では、保存した `.tar` の内容と対象プラットフォームを確認してから SIF を作り、ファイルシステムのアーキテクチャを照合します。
+
+`image-files` の `item` が `archive` または `sif` の行に、該当ファイルのパスと SHA-256 が載ります。`manifest` は SIF の作成に使ったイメージの manifest のダイジェスト、`apptainer` は作成に使った Apptainer イメージです。
+
+```{python}
+#| label: save
+#| echo: false
+with stop_on_error():
+    audit_status = next((step["status"] for step in session.steps if step["step"] == "audit"), "NOT_RUN")
+    archive = None
+    if save and audit_status in ("PASS", "REVIEW"):
+        saved = session.run_step("save", lambda run_id: archive_ops.save_python_image(
+            image, None, platform, run_id=run_id,
+        ))
+        if saved and saved["status"] == "PASS":
+            archive = Path(saved["archive"])
+    else:
+        session.run_step("save", detail="監査に合格していないため、保存していません。" if save else "")
+
+    if archive and audit:
+        readback = session.run_step("audit-archive", lambda run_id: archive_ops.audit_python_image(
+            archive_ops.readback_image_name(image, platform), platform, lock=lock, run_id=run_id,
+            operation="audit-python-archive",
+        ))
+        if readback:
+            checks_file = Path(readback["report"]).with_name("audit-checks.tsv")
+            if checks_file.is_file():
+                session.show_table("archive-audit-checks", session.read_tsv(checks_file))
+            items_file = checks_file.with_name("audit-items.tsv")
+            if items_file.is_file():
+                session.show_table("archive-audit-items", session.read_tsv(items_file))
+    else:
+        session.run_step("audit-archive")
+
+    files = []
+    if archive:
+        files = [{"item": "archive", **row} for row in session.read_tsv(Path(saved["evidence"]) / "archive.tsv")]
+    made = None
+    if archive and sif:
+        made = session.run_step("sif", lambda run_id: archive_ops.save_python_sif(
+            archive, None, platform, run_id=run_id,
+        ))
+        if made:
+            files += [row for row in session.read_tsv(Path(made["evidence"]) / "sif.tsv") if row["item"] != "archive"]
+    else:
+        session.run_step("sif")
+    if files:
+        session.show_table("image-files", files)
+```
+
+# SIF の監査（audit-sif） {#result-sif-audit}
+
+作成した SIF の SHA-256 を `sif.tsv` の値と照合します。`contracts/sif-extract.sh` でファイルシステムを Docker の名前付きボリュームに取り出し、読み戻したイメージの設定（`Env`・`WorkingDir`・`User`）を付けて `docker import` で監査用イメージを復元します。
+
+`sif-audit-checks` で監査項目ごとの判定を確認します。詳しく調べるには、`sif-audit-items` から同じ検査項目の行を探し、期待値と実際の値を比べます。
+
+```{python}
+#| label: audit-sif
+#| echo: false
+with stop_on_error():
+    if audit and made and made["status"] == "PASS":
+        sif_audit = session.run_step("audit-sif", lambda run_id: archive_ops.audit_python_sif(
+            made["sif"], archive_ops.readback_image_name(image, platform), platform, lock=lock,
+            sif_record=Path(made["evidence"]), run_id=run_id,
+        ))
+        if sif_audit:
+            checks_file = Path(sif_audit["report"]).with_name("audit-checks.tsv")
+            if checks_file.is_file():
+                session.show_table("sif-audit-checks", session.read_tsv(checks_file))
+            items_file = checks_file.with_name("audit-items.tsv")
+            if items_file.is_file():
+                session.show_table("sif-audit-items", session.read_tsv(items_file))
+    else:
+        session.run_step("audit-sif", detail="SIF を作れていないため、監査していません。" if sif and audit else "")
+```
+
+# 前回の監査との比較
+
+同じ言語・プラットフォームの第 3 段階の実行 ID を `config.yaml` の `image.compare_to` に指定したときに、今回のイメージの監査と比較します。
+
+| 表 | 見るところ |
+|---|---|
+| `comparison-context` | 両実行の設定や記録を `baseline`（比較元）と `current`（今回）で確認します。差分を読む前に、対象のパッケージ一覧や監査項目（`checks`）が両方で `available` かを確認します。 |
+| `comparison-packages` | 導入済みパッケージの追加（`added`）、削除（`removed`）、版の変更（`changed`）。 |
+| `comparison-checks` | 監査項目の追加、削除、判定の変更。`previous_status` と `current_status` を比べます。 |
+
+```{python}
+#| label: compare
+#| echo: false
+with stop_on_error():
+    audit_step = next(step for step in session.steps if step["step"] == "audit")
+    summary = root / "outputs" / "evidence" / report_id / "audit" / "result-summary.json"
+    metadata = (json.loads(summary.read_text(encoding="utf-8")) if summary.is_file()
+                else {"language": "python", "platform": platform, "status": audit_step["status"]})
+    (session.table_dir / "audit-context.json").write_text(
+        json.dumps(metadata, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8"
+    )
+    if compare_to:
+        try:
+            differences = compare_dependencies(compare_to, report_id, session.table_dir.parent)
+            for name, rows in differences.items():
+                session.show_table(name, rows)
+        except (ValueError, OSError) as error:
+            print(error)
+```
+
+# 工程の照合 {#result-operation-checks}
+
+`steps` で確認したい工程があれば、`operation-checks` で同じ `step` の行を探し、`check`（照合項目）、`status`（判定）、`detail`（理由や件数）を読みます。`operation-check-items` に同じ項目の行があれば、個別の `item` ごとに `expected`（期待値）と `found`（実際の値）を比較できます。
+
+```{python}
+#| label: operation-checks
+#| echo: false
+with stop_on_error():
+    session.show_operation_checks()
+```
+
+# 使用したツールのバージョン
+
+`tool-versions` の `step` はツールを使った工程、`tool` はツール名、`version` は記録されたバージョンです。`render` の行は報告書の描画に使った Quarto のバージョンです。
+
+```{python}
+#| label: tool-versions
+#| echo: false
+with stop_on_error():
+    session.show_table("tool-versions", session.tool_versions)
+```
+
+# 工程ごとの判定 {#result-steps}
+
+`steps` は工程ごとに 1 行です。`step` と `status` で工程名と判定を確かめ、`detail` で補足を読みます。個別の照合は [工程の照合](#result-operation-checks) に、元の検査結果やログは `outputs/evidence/<ID>/<工程>/` にあります。`run_id` が入っている行では、その値が保存先の `<ID>` です。
+
+```{python}
+#| label: run-index
+#| echo: false
+with stop_on_error():
+    session.show_table("steps", session.steps)
+```
+
+```{python}
+#| label: finish
+#| include: false
+# --- 表・証跡・tar・SIF のファイルと各工程の判定を記録に入れて終える ---
+with stop_on_error():
+    state.artifacts = session.artifacts()
+    state.ledger = session.ledger(
+        project=project, stage="image", image=image, dependency_lock=image_settings["dependency_lock"],
+    )
+repro.finish(state)
+```

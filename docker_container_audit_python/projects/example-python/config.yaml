@@ -1,0 +1,16 @@
+# --- 見本のプロジェクト example-python の設定（各段階の報告書が読む）---
+experiment_name: example-python
+seed: 1
+project: example-python
+platform: linux/arm64
+discovery:
+  apt_snapshot: ""
+  review_notes: ""
+image:
+  dependency_lock: "outputs/evidence/20261127_160245_python-dependency-discovery_8790/confirm/dependency-lock.tsv"
+  image: ""
+  build: true
+  audit: true
+  save: true
+  sif: true
+  compare_to: ""

@@ -1,0 +1,15 @@
+Package: AuditRTarget
+Type: Project
+Title: R Container Audit Target
+Version: 0.1.0
+Description: Dependency definition for evaluating an R container.
+License: MIT
+Imports:
+    tidyverse,
+    grf,
+    policytree,
+    odbc,
+    testthat,
+    DiagrammeR,
+    DiagrammeRsvg,
+    rsvg

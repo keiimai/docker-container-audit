@@ -1,0 +1,22 @@
+# --- 引用の情報（README.md「構成」）---
+
+cff-version: 1.2.0
+title: "Container Dependency Audit"
+message: "このソフトウェアを使った成果を公表する際は、下記の情報で引用してください。"
+type: software
+authors:
+  - family-names: "Imai"
+    given-names: "Kei"
+    email: "keiimai1220@gmail.com"
+    affiliation: "The University of Tokyo, Japan"
+abstract: >-
+  Docker のコンテナのイメージの依存を確かめる道具。
+  第 1 段階で、固定ベースを使って R・Python と Ubuntu の依存を調べ、採用する版を確定する。第 2 段階で、確定記録から Dockerfile とビルド用ファイルを生成する。第 3 段階でイメージをビルドし、イメージ、保存した tar から読み戻したイメージ、Apptainer の SIF の中身を確定記録と照合して監査する。R と Python の開発環境を対で持ち、両言語に共通の決まりを 1 か所に置く。
+license: MIT
+version: 0.1.0
+keywords:
+  - reproducible research
+  - Docker
+  - dependency analysis
+  - R
+  - Python

@@ -1,0 +1,3 @@
+# --- 第 1 段階の固定ベースと、R パッケージの取得元（README.md「2 つの段階」）---
+BASE_IMAGE=rocker/rstudio:4.5.3@sha256:ca42f2e50641dffb9b837ed25c87e7a187cb153348fba8596acfafa0f83765a5
+R_REPOSITORY=https://p3m.dev/cran/__linux__/noble/2026-04-23

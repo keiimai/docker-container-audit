@@ -1,0 +1,343 @@
+---
+title: "R のイメージのビルドと監査（第 3 段階）"
+format: html
+params:
+  project: "example-r"
+execute:
+  cache: false
+---
+
+第 3 段階では、第 2 段階でそろえた Dockerfile からイメージを作り、第 1 段階の確定記録と照合します。設定に応じて Docker の保存ファイル（`.tar`）と Apptainer の SIF を作り、それぞれの中身も監査します。
+
+# この報告書の読み方
+
+::: {.callout-note}
+まず [工程ごとの判定](#result-steps) で、今回実行する予定の工程の `status` を見ます。気になる判定は `detail` を読み、[工程の照合](#result-operation-checks) か各監査の表で理由を確認します。
+
+保存ファイルを探すときは [保存・読み戻し・SIF の作成](#result-save) の `image-files` を見ます。題名の下にある実行 ID を、保存先の `<ID>` に当てはめてください。
+:::
+
+## 各工程でやること
+
+| 工程 | 実行する条件 | することと `PASS` になる条件 |
+|---|---|---|
+| [ビルド](#result-build-audit)（`build`） | `image.build` が有効。 | 確定記録を照合し、`dockerfile/` を使って指定のプラットフォームのイメージをビルドする。 |
+| [イメージの監査](#result-build-audit)（`audit`） | `image.audit` が有効。ビルドも有効なら `build` の `PASS` が必要。 | R と Ubuntu の依存、共有ライブラリなどを調べ、すべての監査項目が合格する。 |
+| [保存と読み戻し](#result-save)（`save`） | `image.save` が有効で、`audit` が `PASS` または `REVIEW`。 | `.tar` に保存して別名で読み戻し、元のイメージと ID・層が一致することを確かめる。 |
+| [読み戻したイメージの監査](#result-save)（`audit-archive`） | `save` が `PASS` で、監査が有効。 | 読み戻したイメージのすべての監査項目が合格する。 |
+| [SIF の作成](#result-save)（`sif`） | `save` が `PASS` で、`image.sif` が有効。 | `.tar` から SIF を作り、ファイルシステムが指定したアーキテクチャであることを確かめる。 |
+| [SIF の監査](#result-sif-audit)（`audit-sif`） | `sif` が `PASS` で、監査が有効。 | SIF から復元したイメージのすべての監査項目が合格する。 |
+
+| 判定 | 読み方 |
+|---|---|
+| `PASS` | 工程を完了し、その工程の照合条件を満たしました。 |
+| `REVIEW` | 確認が必要な項目があります。`detail` で理由を確認します。 |
+| `FAIL` | 工程の処理または照合に失敗しました。`detail` と工程のログを確認します。 |
+| `NOT_RUN` | 設定で省いたか、開始に必要な先行工程の結果が得られず、実行していません。 |
+
+## 実行と出力
+
+`project` で対象を選びます。既定は `example-r` です。`projects/<名前>/config.yaml` の `image.dependency_lock` には第 2 段階と同じ確定記録を指定します。ビルドする場合は `projects/<名前>/dockerfile/` に第 2 段階のファイルをそろえます。
+
+`image.image` はイメージ名で、省略すると `<名前>:local` です。既存イメージを監査する場合はその名前を指定し、`image.build` を `false` にします。工程の有効・無効や、比較元の実行 ID（`image.compare_to`）も同じ設定ファイルに書きます。
+
+Docker とネットワークに接続できる環境で、R 側のプロジェクトのルートから `bash tools/runner.sh render notebooks/r-image-build.qmd project:<名前>` を実行します。
+
+| 探すもの | 保存先 |
+|---|---|
+| HTML 報告書 | `outputs/reports/<ID>/` |
+| 判定表 `steps.csv` と各結果表 | `outputs/tables/<ID>/` |
+| 詳細な照合結果とログ | `outputs/evidence/<ID>/<工程>/` |
+| 保存された `.tar` と SIF | `outputs/images/<ID>/` |
+| 実行記録と設定の写し | `outputs/repro/<ID>/` |
+
+```{r}
+#| label: setup
+#| include: false
+root <- normalizePath(getwd(), mustWork = TRUE)
+while (!file.exists(file.path(root, "R", "evidence.R"))) {
+  parent <- dirname(root)
+  if (identical(parent, root)) stop("プロジェクトのルートを特定できません。")
+  root <- parent
+}
+# --- R の検査用（Dockerfile.runner）の中でなければ止める ---
+if (!identical(Sys.getenv("AUDIT_RUNNER"), "r")) {
+  stop("R の検査用の中で描いてください。R の子の根で `bash tools/runner.sh render ",
+       "notebooks/r-image-build.qmd project:<名前>` を実行します（README.md「本番の手順」）。")
+}
+knitr::opts_knit$set(root.dir = root)
+# --- ここから先は R の子の根で動かす（root.dir が効くのは次のチャンクから）---
+previous_dir <- setwd(root)
+# --- R/ の関数を全部読み込み、.env と記録層の一時ファイルの置き場所を整える ---
+for (path in list.files("R", pattern = "[.][Rr]$", full.names = TRUE)) {
+  source(path, local = knitr::knit_global())
+}
+audit_setup(knitr::knit_global())
+# --- 設定を projects/<project>/config.yaml から読む ---
+cfg <- load_project_config(params$project)
+repro_set_seed(cfg$seed)
+platform <- cfg$platform
+# --- 第 1 段階の確定記録を読む（無ければ止める）---
+lock <- required_lock(config_text(cfg$image$dependency_lock, "image.dependency_lock"))
+image <- config_text(cfg$image$image, "image.image")
+# --- 監査するイメージの名前（空なら <プロジェクト名>:local）---
+if (!nzchar(image)) image <- paste0(params$project, ":local")
+run <- list(build = config_flag(cfg$image$build, "image.build"),
+            audit = config_flag(cfg$image$audit, "image.audit"),
+            save = config_flag(cfg$image$save, "image.save"),
+            sif = config_flag(cfg$image$sif, "image.sif"))
+compare_to <- config_text(cfg$image$compare_to, "image.compare_to")
+record_inputs <- c(report_inputs(params$project, "image", lock), "notebooks/r-image-build.qmd")
+setwd(previous_dir)
+```
+
+```{r}
+#| label: begin
+#| include: false
+state <- repro_run(cfg, inputs = record_inputs)
+report <- report_session(state$run_id)
+show_table <- report$show_table
+add_step <- report$add_step
+run_step <- report$run_step
+# --- 工程の外で止まったら、記録を failed にしてから止める ---
+guard <- function(expr) {
+  tryCatch(expr, error = function(e) {
+    repro_fail(state, e)
+    stop(e)
+  })
+}
+# --- 監査の項目ごとの判定と、1 つずつの照合の表を出す ---
+show_audit <- function(result, prefix) {
+  read <- function(name) {
+    path <- file.path(result$directory, name)
+    if (file.exists(path)) read.delim(path, colClasses = "character", na.strings = NULL)
+  }
+  checks <- read("audit-checks.tsv")
+  if (!is.null(checks)) show_table(paste0(prefix, "-checks"), checks)
+  items <- read("audit-items.tsv")
+  if (!is.null(items)) show_table(paste0(prefix, "-items"), items)
+  checks
+}
+# --- 工程が PASS か REVIEW かを返す ---
+passed <- function(name) report$status(name) %in% c("PASS", "REVIEW")
+archive <- NULL
+made <- NULL
+```
+
+報告書の ID は `r state$run_id`、プロジェクトは `r params$project`、イメージは `r image`、プラットフォームは `r platform`、確定記録は `r lock` です。
+
+# ビルドとイメージの監査（build・audit） {#result-build-audit}
+
+**ビルド（`build`）**では、確定記録にあるファイルの SHA-256、言語、プラットフォームを照合してから `docker buildx build` を実行します。`--build-arg` は渡さず、Dockerfile の設定を使います。ビルド後に確定記録が変わっていないことと、イメージのプラットフォームを確かめます。入力ファイルの SHA-256 は、工程の証跡の `inputs.tsv` で確認できます。
+
+**監査（`audit`）**はネットワークを切ったコンテナで行います。確定記録の `DESCRIPTION` にある版の条件、依存の不足、名前空間の読み込み、固定ベースに含まれる R パッケージとの差を調べます。導入記録 `r-install-report.tsv` があれば、版とアーカイブの SHA-256 を確定記録と照合します。ハッシュを照合するための記録がなければ、その照合は `REVIEW` です。
+
+共有ライブラリの読み込み、APT と dpkg の整合、Ubuntu パッケージの版と固定ベースとの差も確認します。確定したパッケージが足りないか版が違えば `FAIL`、確定記録にないパッケージが増えていれば `REVIEW` です。
+
+| 表 | 見るところ |
+|---|---|
+| `audit-checks` | 検査名（`check`）、判定（`status`）、理由や件数（`detail`）。 |
+| `audit-items` | 個々の照合対象と `expected`（期待値）、`found`（実際の値）、`status`（判定）。 |
+| `installed-packages` | イメージに入っている R と Ubuntu パッケージの名前と版。 |
+| `audit-native-libraries` | 読み込み元のファイル（`file`）、ライブラリ名（`soname`）、見つかった場所（`path`）、提供元（`owners`）。 |
+
+```{r}
+#| label: verify
+#| echo: false
+#| results: asis
+#| message: false
+#| warning: false
+guard({
+  if (run$build) {
+    run_step("build", build_r_image(image, lock, params$project, platform,
+                                    run_id = state$run_id))
+  } else {
+    add_step("build", "NOT_RUN")
+  }
+  build_ok <- !run$build || identical(report$status("build"), "PASS")
+  if (run$audit && build_ok) {
+    audit <- run_step("audit", audit_r_image(image, lock, platform = platform,
+                                             run_id = state$run_id))
+    checks <- show_audit(audit, "audit")
+    if (!is.null(checks)) {
+      meanings <- contract_read_tsv("audit-checks.tsv")
+      found <- meanings[match(checks$check, meanings$check), ]
+      cat("各項目の意味\n\n", paste0("- `", found$check, "`：", found$meaning, "\n"), "\n",
+          sep = "")
+    }
+    for (table in c("installed-packages", "audit-native-libraries")) {
+      name <- if (table == "installed-packages") table else "native-libraries"
+      path <- file.path(audit$directory, paste0(name, ".tsv"))
+      if (file.exists(path)) {
+        show_table(table, read.delim(path, colClasses = "character", na.strings = NULL))
+      }
+    }
+  } else {
+    add_step("audit", "NOT_RUN", detail = if (run$audit) {
+      "ビルドが済んでいないため、監査していません。"
+    } else {
+      ""
+    })
+  }
+})
+```
+
+# 保存・読み戻し・SIF の作成（save・audit-archive・sif） {#result-save}
+
+**保存と読み戻し（`save`）**では、監査が `PASS` または `REVIEW` のイメージを `.tar` に保存し、`audit-readback/<イメージ>:<アーキテクチャ>` として読み戻します。保存ファイルが空でなく、読み戻したイメージの ID と層が、元のイメージの対象プラットフォームのものと一致するかを確認します。
+
+**読み戻したイメージの監査（`audit-archive`）**では、保存に成功したイメージを同じ確定記録で再監査します。`archive-audit-checks` で項目ごとの判定、`archive-audit-items` で個々の照合結果を読みます。
+
+**SIF の作成（`sif`）**では、保存した `.tar` の内容と対象プラットフォームを確認してから SIF を作り、ファイルシステムのアーキテクチャを照合します。
+
+`image-files` の `item` が `archive` または `sif` の行に、該当ファイルのパスと SHA-256 が載ります。`manifest` は SIF の作成に使ったイメージの manifest のダイジェスト、`apptainer` は作成に使った Apptainer イメージです。
+
+```{r}
+#| label: save
+#| echo: false
+#| results: asis
+#| message: false
+#| warning: false
+guard({
+  if (run$save && passed("audit")) {
+    folder <- file.path("outputs", "images", state$run_id)
+    dir.create(folder, recursive = TRUE, showWarnings = FALSE)
+    saved <- run_step("save", save_r_image(
+      image, file.path(folder, image_archive_name(image, platform)), platform,
+      run_id = state$run_id))
+    if (identical(saved$status, "PASS")) archive <- saved$value
+  } else {
+    add_step("save", "NOT_RUN", detail = if (run$save) {
+      "監査に合格していないため、保存していません。"
+    } else {
+      ""
+    })
+  }
+  if (!is.null(archive) && run$audit) {
+    readback <- run_step("audit-archive", audit_r_image(
+      readback_image_name(image, platform), lock, platform = platform,
+      operation = "audit-r-archive", run_id = state$run_id))
+    show_audit(readback, "archive-audit")
+  } else {
+    add_step("audit-archive", "NOT_RUN")
+  }
+  files <- NULL
+  if (!is.null(archive)) {
+    recorded <- read.delim(file.path(saved$directory, "archive.tsv"), colClasses = "character")
+    files <- data.frame(item = "archive", path = recorded$path, sha256 = recorded$sha256)
+  }
+  if (!is.null(archive) && run$sif) {
+    made <- run_step("sif", save_r_sif(archive, sub("[.]tar$", ".sif", archive), platform,
+                                       run_id = state$run_id))
+    table <- file.path(made$directory, "sif.tsv")
+    if (file.exists(table)) {
+      rows <- read.delim(table, colClasses = "character", na.strings = NULL)
+      files <- rbind(files, rows[rows$item != "archive", ])
+    }
+  } else {
+    add_step("sif", "NOT_RUN")
+  }
+  if (!is.null(files)) show_table("image-files", files)
+})
+```
+
+# SIF の監査（audit-sif） {#result-sif-audit}
+
+作成した SIF の SHA-256 を `sif.tsv` の値と照合します。`contracts/sif-extract.sh` でファイルシステムを Docker の名前付きボリュームに取り出し、読み戻したイメージの設定（`Env`・`WorkingDir`・`User`）を付けて `docker import` で監査用イメージを復元します。
+
+`sif-audit-checks` で監査項目ごとの判定を確認します。詳しく調べるには、`sif-audit-items` から同じ検査項目の行を探し、期待値と実際の値を比べます。
+
+```{r}
+#| label: audit-sif
+#| echo: false
+#| results: asis
+#| message: false
+#| warning: false
+guard({
+  if (!is.null(made) && identical(made$status, "PASS") && run$audit) {
+    sif_audit <- run_step("audit-sif", audit_r_sif(
+      made$value, readback_image_name(image, platform), lock, made$directory, platform,
+      run_id = state$run_id))
+    show_audit(sif_audit, "sif-audit")
+  } else {
+    add_step("audit-sif", "NOT_RUN", detail = if (run$sif) {
+      "SIF を作れていないため、SIF を監査していません。"
+    } else {
+      ""
+    })
+  }
+})
+```
+
+# 前回の監査との比較
+
+同じ言語・プラットフォームの第 3 段階の実行 ID を `config.yaml` の `image.compare_to` に指定したときに、今回のイメージの監査と比較します。
+
+| 表 | 見るところ |
+|---|---|
+| `comparison-context` | 両実行の設定や記録を `baseline`（比較元）と `current`（今回）で確認します。差分を読む前に、対象のパッケージ一覧や監査項目（`checks`）が両方で `available` かを確認します。 |
+| `comparison-packages` | 導入済みパッケージの追加（`added`）、削除（`removed`）、版の変更（`changed`）。 |
+| `comparison-checks` | 監査項目の追加、削除、判定の変更。`previous_status` と `current_status` を比べます。 |
+
+```{r}
+#| label: compare
+#| echo: false
+#| results: asis
+guard({
+  summary <- file.path(evidence_root(), state$run_id, "audit", "result-summary.json")
+  context <- if (file.exists(summary)) jsonlite::read_json(summary) else
+    list(language = "r", platform = platform, status = report$status("audit"))
+  jsonlite::write_json(context, file.path(report$table_dir, "audit-context.json"),
+                       auto_unbox = TRUE, null = "null")
+  if (nzchar(compare_to)) {
+    differences <- tryCatch(compare_dependencies(compare_to, state$run_id,
+                                                 dirname(report$table_dir)),
+                            error = identity)
+    if (inherits(differences, "error")) cat(conditionMessage(differences), "\n") else
+      for (name in names(differences)) show_table(name, differences[[name]])
+  }
+})
+```
+
+# 工程の照合 {#result-operation-checks}
+
+`steps` で確認したい工程があれば、`operation-checks` で同じ `step` の行を探し、`check`（照合項目）、`status`（判定）、`detail`（理由や件数）を読みます。`operation-check-items` に同じ項目の行があれば、個別の `item` ごとに `expected`（期待値）と `found`（実際の値）を比較できます。
+
+```{r}
+#| label: operation-checks
+#| echo: false
+#| results: asis
+guard(report$show_operation_checks())
+```
+
+# 使用したツールのバージョン
+
+`tool-versions` の `step` はツールを使った工程、`tool` はツール名、`version` は記録されたバージョンです。`render` の行は報告書の描画に使った Quarto のバージョンです。
+
+```{r}
+#| label: tool-versions
+#| echo: false
+#| results: asis
+guard(show_table("tool-versions", report$tool_versions()))
+```
+
+# 工程ごとの判定 {#result-steps}
+
+`steps` は工程ごとに 1 行です。`step` と `status` で工程名と判定を確かめ、`detail` で補足を読みます。個別の照合は [工程の照合](#result-operation-checks) に、元の検査結果やログは `outputs/evidence/<ID>/<工程>/` にあります。`run_id` が入っている行では、その値が保存先の `<ID>` です。
+
+```{r}
+#| label: run-index
+#| echo: false
+#| results: asis
+guard(show_table("steps", report$steps()))
+```
+
+```{r}
+#| label: finish
+#| include: false
+# --- 表・証跡・tar・SIF のファイルと各工程の判定を記録に入れて終える ---
+state$artifacts <- report$artifacts()
+state$ledger <- report$ledger(project = params$project, stage = "image", image = image,
+                              dependency_lock = lock)
+repro_finish(state)
+```

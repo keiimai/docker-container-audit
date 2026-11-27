@@ -1,0 +1,14 @@
+language	file	description
+common	build-environment.json	固定ベース・プラットフォーム・APT スナップショット・入力のハッシュと、R はパッケージの取得元、Python は Python の版（build-environment.schema.json）
+common	dependency-review.tsv	要確認項目と確認根拠
+r	DESCRIPTION	第 1 段階の入力（projects/<名前>/request/DESCRIPTION）の写し（第 2 段階の監査が版条件を照合する）
+python	requirements.txt	第 1 段階の入力（projects/<名前>/request/requirements.txt）の写し（第 2 段階の監査が要件を照合する）
+common	ubuntu-pins.txt	導入する Ubuntu パッケージの版（APT の name=version）
+common	ubuntu-packages.tsv	Ubuntu の依存調査の結果（導入後のすべてのパッケージ。列は tables.tsv の ubuntu-packages）
+common	base-ubuntu.tsv	固定ベースの Ubuntu パッケージ一覧（1 行目は # <固定ベース> <プラットフォーム>）
+r	r-packages.tsv	R の依存調査の結果（列は tables.tsv の r-packages）
+r	r-pins.tsv	導入する R パッケージの版と SHA-256（package・version・sha256）
+r	base-r.tsv	固定ベースの R パッケージ一覧
+python	python-packages.tsv	Python の依存調査の結果（列は tables.tsv の python-packages）
+python	python-pins.tsv	導入する Python の配布物の版と SHA-256（package・version・sha256。wheel が複数なら「; 」でつなぐ）
+python	pylock.toml	uv の解決結果（wheel ごとの取得元と SHA-256。PEP 751。人が書く Dockerfile で uv に読ませられる）

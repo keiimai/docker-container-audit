@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "contracts/build-environment.schema.json",
+  "title": "build-environment.json 1.0",
+  "description": "第 1 段階の依存調査と確定記録（dependency-lock.tsv）に置く、ビルド環境の記録。R と Python で共通。第 2 段階は、確定記録の中のこの記録と照合する。",
+  "type": "object",
+  "required": ["schema_version", "language", "base_image", "platform", "apt_snapshot", "inputs"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "language": {"enum": ["r", "python"]},
+    "base_image": {"type": "string"},
+    "platform": {"enum": ["linux/amd64", "linux/arm64"]},
+    "apt_snapshot": {"type": ["string", "null"], "pattern": "^[0-9]{8}T[0-9]{6}Z$"},
+    "inputs": {
+      "type": "object",
+      "additionalProperties": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+    },
+    "r_repository": {"type": "string"},
+    "python_version": {"type": "string"},
+    "review": {"type": "string"},
+    "evidence": {
+      "type": "object",
+      "additionalProperties": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+    }
+  }
+}

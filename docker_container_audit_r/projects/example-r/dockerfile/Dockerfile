@@ -1,0 +1,39 @@
+# syntax=docker/dockerfile:1.29.0@sha256:572cebbc2b15e6f84c077742952674889cb63cd5e9b80abdffcbe587b6f19183
+# --- 第 2 段階で値を入れ、第 3 段階でビルドする R の Dockerfile（Python は dockerfile-templates/Dockerfile.generate）（README.md「第 2 段階の中身」）---
+
+# --- 確定記録の build-environment.json から固定ベースと取得元の時点を設定する（README.md「第 2 段階の中身」）---
+ARG BASE_IMAGE=rocker/rstudio:4.5.3@sha256:ca42f2e50641dffb9b837ed25c87e7a187cb153348fba8596acfafa0f83765a5
+FROM ${BASE_IMAGE}
+ARG R_REPOSITORY=https://p3m.dev/cran/__linux__/noble/2026-04-23
+ARG APT_SNAPSHOT=20261127T070249Z
+ENV R_REPOSITORY=${R_REPOSITORY}
+
+# --- 確定した Ubuntu の版を入れて取得元を戻し、確定した R パッケージを SHA-256 と照合して入れる ---
+RUN --mount=type=bind,target=/opt/build <<'SH'
+set -eu
+for name in r-pins.tsv ubuntu-pins.txt; do
+    if [ ! -f "/opt/build/$name" ]; then
+        echo "ビルド用ファイルが見つかりません: $name" >&2
+        exit 1
+    fi
+done
+case "${APT_SNAPSHOT:-}" in
+    [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;;
+    *)
+        echo "確定記録の APT スナップショットが不正です。" >&2
+        exit 1
+        ;;
+esac
+. /etc/os-release
+test "$ID:$VERSION_ID" = ubuntu:24.04
+mv /etc/apt/sources.list.d/ubuntu.sources /etc/apt/ubuntu.sources.original
+sed "s|^URIs:.*|URIs: https://snapshot.ubuntu.com/ubuntu/$APT_SNAPSHOT/|; /^URIs:/a Check-Valid-Until: no" \
+    /etc/apt/ubuntu.sources.original > /etc/apt/sources.list.d/ubuntu.sources
+if [ -s /opt/build/ubuntu-pins.txt ]; then
+    apt-get -o APT::Update::Error-Mode=any update
+    xargs -r apt-get install -y --no-install-recommends < /opt/build/ubuntu-pins.txt
+fi
+mv /etc/apt/ubuntu.sources.original /etc/apt/sources.list.d/ubuntu.sources
+rm -rf /var/lib/apt/lists/*
+Rscript --vanilla /opt/build/install-dependencies.R /opt/build/r-pins.tsv
+SH

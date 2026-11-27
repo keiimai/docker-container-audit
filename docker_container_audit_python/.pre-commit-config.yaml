@@ -1,0 +1,41 @@
+# --- コミット前に自動で走る検査（.githooks/pre-commit が呼ぶ。道具は pre-commit が取ってくる）（CHECKS.md 1 節）---
+
+# --- 走らせるフック（CHECKS.md 1 節）---
+repos:
+  # --- 基本的な安全網（CHECKS.md 1 節）---
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-added-large-files
+        name: 大きなファイルのコミットを阻止（データの混入対策）
+        args: ["--maxkb=2048", "--enforce-all"]
+      - id: detect-private-key
+        name: 秘密鍵の混入を阻止
+      - id: check-ast
+        name: Python の構文
+      - id: end-of-file-fixer
+        name: ファイルの末尾の改行
+      - id: trailing-whitespace
+        name: 行末の空白
+        exclude: '\.(md|csv|csv2|csvy|tsv|psv|dat|fwf)$'
+      - id: check-yaml
+        name: YAML の構文
+        args: ["--allow-multiple-documents"]
+        files: '(\.ya?ml|^CITATION\.cff)$'
+        types: [text]
+
+  # --- ノートブックの出力を除去（CHECKS.md 1 節）---
+  - repo: https://github.com/kynan/nbstripout
+    rev: 0.9.1
+    hooks:
+      - id: nbstripout
+        name: ノートブックの出力を除去
+
+  # --- よく知られたトークン、秘密情報らしい値、JSON の構文、src/ の記録の流れ（標準ライブラリだけで動く）（CHECKS.md 1 節）---
+  - repo: local
+    hooks:
+      - id: precommit-checks
+        name: トークン・秘密情報の値・JSON の構文・記録の流れ
+        entry: python tools/precommit_checks.py
+        language: python
+        types: [text]

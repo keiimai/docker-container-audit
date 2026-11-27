@@ -1,0 +1,66 @@
+# syntax=docker/dockerfile:1.29.0@sha256:572cebbc2b15e6f84c077742952674889cb63cd5e9b80abdffcbe587b6f19183
+# --- 第 2 段階で値を入れ、第 3 段階でビルドする Python の Dockerfile（R は dockerfile-templates/Dockerfile.generate）（README.md「第 2 段階の中身」）---
+
+# --- 確定記録の固定ベースと取得元の時点、および uv ---
+ARG BASE_IMAGE=ubuntu:24.04@sha256:9c7f200c07e3d4a03e7249d2c16bf66a51120fb876aa2242cf31451412543289
+ARG APT_SNAPSHOT=20261127T070250Z
+ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.13.0@sha256:cdc6093146eb3ff6a40107b38f008b789e050e77ad87865e381d9917da55a168
+ARG TARGETARCH
+FROM ${UV_IMAGE} AS uv
+
+# --- Quarto の公式の配布物（R のイメージと同じ版。アーキテクチャごとの SHA-256 で固定）---
+FROM scratch AS quarto_amd64
+ADD --checksum=sha256:39d2e4546274be39a27cceeeed21a60b693c4c477a8c8cb43fb34326442f3910 \
+    https://github.com/quarto-dev/quarto-cli/releases/download/v1.9.36/quarto-1.9.36-linux-amd64.tar.gz /quarto.tar.gz
+FROM scratch AS quarto_arm64
+ADD --checksum=sha256:6f4b2fee6be469ae038a23fe3196010f29d7716129eed2891524c1f88ad82f2f \
+    https://github.com/quarto-dev/quarto-cli/releases/download/v1.9.36/quarto-1.9.36-linux-arm64.tar.gz /quarto.tar.gz
+FROM quarto_${TARGETARCH} AS quarto
+
+# --- Ubuntu の取得元を確定記録の APT スナップショットの時点にする（証明書を先に取り出す）---
+FROM ${BASE_IMAGE} AS python_base
+ARG APT_SNAPSHOT
+RUN --mount=type=tmpfs,target=/tmp \
+    set -eu; \
+    if ! printf '%s\n' "${APT_SNAPSHOT}" | grep -Eq '^[0-9]{8}T[0-9]{6}Z$'; then \
+        echo "確定記録の APT スナップショットが不正です。" >&2; \
+        exit 1; \
+    fi; \
+    . /etc/os-release; test "$ID:$VERSION_ID" = ubuntu:24.04; \
+    apt-get -o APT::Update::Error-Mode=any update; \
+    cd /tmp; apt-get download ca-certificates; dpkg-deb -x ca-certificates*.deb .; \
+    find usr/share/ca-certificates -name '*.crt' -exec cat {} + > /etc/apt/snapshot-ca.pem; \
+    mv /etc/apt/sources.list.d/ubuntu.sources /etc/apt/ubuntu.sources.original; \
+    sed "s|^URIs:.*|URIs: https://snapshot.ubuntu.com/ubuntu/$APT_SNAPSHOT/|; /^URIs:/a Check-Valid-Until: no" \
+        /etc/apt/ubuntu.sources.original > /etc/apt/sources.list.d/ubuntu.sources; \
+    printf 'Acquire::https::CaInfo "/etc/apt/snapshot-ca.pem";\n' > /etc/apt/apt.conf.d/99audit-snapshot; \
+    rm -rf /var/lib/apt/lists/*
+
+# --- 確定した Ubuntu の版を入れて取得元を戻し、uv で仮想環境を作る ---
+FROM python_base
+ENV UV_PYTHON_DOWNLOADS=never UV_NO_CACHE=1
+RUN --mount=type=bind,source=ubuntu-pins.txt,target=/opt/confirmed/ubuntu-pins.txt \
+    --mount=type=bind,from=uv,source=/uv,target=/usr/local/bin/uv \
+    apt-get -o APT::Update::Error-Mode=any update \
+    && xargs -r apt-get install -y --no-install-recommends < /opt/confirmed/ubuntu-pins.txt \
+    && mv /etc/apt/ubuntu.sources.original /etc/apt/sources.list.d/ubuntu.sources \
+    && rm /etc/apt/apt.conf.d/99audit-snapshot /etc/apt/snapshot-ca.pem \
+    && rm -rf /var/lib/apt/lists/* \
+    && uv venv /opt/python --python /usr/bin/python3
+ENV PATH="/opt/python/bin:${PATH}"
+
+# --- pylock.toml の wheel だけを SHA-256 と照合して入れ、使った pylock.toml をイメージに残す ---
+RUN --mount=type=bind,source=pylock.toml,target=/opt/confirmed/pylock.toml \
+    --mount=type=bind,from=uv,source=/uv,target=/usr/local/bin/uv \
+    uv pip sync --python /opt/python/bin/python --require-hashes /opt/confirmed/pylock.toml \
+    && cp /opt/confirmed/pylock.toml /opt/python/audit-pylock.toml
+
+# --- uv をイメージに入れる（引き渡した先でも uv を使える）---
+COPY --from=uv /uv /usr/local/bin/uv
+
+# --- Quarto を /opt/quarto に展開し、/usr/local/bin/quarto から使えるようにする ---
+RUN --mount=type=bind,from=quarto,target=/opt/quarto-archive \
+    mkdir -p /opt/quarto \
+    && tar -xzf /opt/quarto-archive/quarto.tar.gz -C /opt/quarto --strip-components=1 \
+    && ln -s /opt/quarto/bin/quarto /usr/local/bin/quarto \
+    && quarto --version

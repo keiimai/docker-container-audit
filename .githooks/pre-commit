@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# --- 親のコミット前の検査：2 つの子の骨格のフックを、書き換えずに、子を根とする git の見え方で走らせる（README.md「検査とテスト」）---
+# --- 親の根に移り、親の索引と 2 つの子を決める ---
+set -uo pipefail
+root="$(git rev-parse --show-toplevel)" || exit 1
+cd "$root" || exit 1
+gitdir="$(git rev-parse --absolute-git-dir)" || exit 1
+index="${GIT_INDEX_FILE:-${gitdir}/index}"
+children=(docker_container_audit_r docker_container_audit_python)
+
+# --- 子ごとに、見え方（共有した objects・子の索引・子の HEAD）を作り、子の骨格のフックを走らせる（README.md「実装の覚え書き」）---
+fail=0
+for child in "${children[@]}"; do
+  hook="$root/$child/.githooks/pre-commit"
+  if [ ! -f "$hook" ]; then
+    printf '\033[31m[pre-commit]\033[0m %s の骨格のフックがありません: %s\n' "$child" "$hook" >&2
+    fail=1
+    continue
+  fi
+  printf '[pre-commit] %s の骨格の検査\n' "$child" >&2
+
+  view="$gitdir/child-views/$child"
+  if [ ! -f "$view/HEAD" ]; then
+    git init -q --bare "$view" || { fail=1; continue; }
+  fi
+  printf '%s\n' "$gitdir/objects" > "$view/objects/info/alternates"
+
+  rm -f "$view/index"
+  while IFS= read -r -d '' entry; do
+    meta="${entry%%$'\t'*}"
+    path="${entry#*$'\t'}"
+    printf '%s\t%s\0' "$meta" "${path#"$child/"}"
+  done < <(GIT_INDEX_FILE="$index" git ls-files -s -z -- "$child/") \
+    | GIT_DIR="$view" GIT_INDEX_FILE="$view/index" git update-index -z --index-info || { fail=1; continue; }
+
+  if tree="$(git rev-parse --verify -q "HEAD:$child" 2>/dev/null)"; then
+    commit="$(GIT_DIR="$view" GIT_AUTHOR_NAME=view GIT_AUTHOR_EMAIL=view@localhost \
+      GIT_COMMITTER_NAME=view GIT_COMMITTER_EMAIL=view@localhost \
+      GIT_AUTHOR_DATE='2000-01-01T00:00:00Z' GIT_COMMITTER_DATE='2000-01-01T00:00:00Z' \
+      git commit-tree "$tree" -m "view of $child" </dev/null)" || { fail=1; continue; }
+    GIT_DIR="$view" git update-ref HEAD "$commit" || { fail=1; continue; }
+  else
+    GIT_DIR="$view" git update-ref -d HEAD 2>/dev/null || true
+  fi
+
+  (cd "$root/$child" && GIT_DIR="$view" GIT_WORK_TREE="$root/$child" GIT_INDEX_FILE="$view/index" \
+    bash "$hook" "$@") || fail=1
+done
+
+# --- どちらかの子に指摘があれば、コミットを止める ---
+if [ "$fail" -ne 0 ]; then
+  echo "[pre-commit] 子の検査に指摘があります。上の案内に従って直し、git add してからもう一度 commit してください。" >&2
+  exit 1
+fi
+exit 0

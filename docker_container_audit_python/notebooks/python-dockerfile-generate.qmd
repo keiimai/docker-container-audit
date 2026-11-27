@@ -1,0 +1,132 @@
+---
+title: "Python の Dockerfile の生成（第 2 段階）"
+format: html
+jupyter: python3
+execute:
+  cache: false
+  daemon: false
+---
+
+第 2 段階では、第 1 段階で確定した依存の記録から、第 3 段階で使う Dockerfile とビルド用ファイルをそろえます。
+
+# この報告書の読み方
+
+::: {.callout-note}
+[生成したファイル](#result-generated-files) の表で、`projects/<名前>/dockerfile/` にそろったファイルと SHA-256 を確認します。第 3 段階で使うのは、このフォルダと今回指定した確定記録です。
+
+照合や生成の途中でエラーが出ると描画を中断します。その場合は実行時のエラーと、実行記録が作られていればその内容を確認します。
+:::
+
+## 生成までにやること
+
+| 作業 | 確かめることと結果 |
+|---|---|
+| 確定記録と入力を照合する | 確定記録の言語、プラットフォーム、ファイルの SHA-256 を照合する。現在の `request/` が調査時と同じかも確かめる。 |
+| ビルド用ファイルを作る | 固定ベースやスナップショット時点を Dockerfile に差し込み、確定した版の一覧などをそろえる。 |
+| 照合して保存する | 保存前に確定記録や入力が変わっていないことを確かめ、ファイルを配置する。配置したファイルの SHA-256 を報告書と実行記録に残す。 |
+
+## 実行と出力
+
+`project` で対象を選びます。既定は `example-python` です。第 1 段階の表 `dockerfile-inputs` に出た `dependency_lock` を、`projects/<名前>/config.yaml` の `image.dependency_lock` に設定します。内容の異なる同名ファイルを意図して置き換えるときは、同じ設定ファイルで `dockerfile.replace` を `true` にします。
+
+Python 側のプロジェクトのルートから `bash tools/runner.sh render notebooks/python-dockerfile-generate.qmd project:<名前>` を実行します。
+
+| 探すもの | 保存先 |
+|---|---|
+| ビルド用ファイル | `projects/<名前>/dockerfile/` |
+| HTML 報告書 | `outputs/reports/<ID>/` |
+| 実行記録と設定の写し | `outputs/repro/<ID>/` |
+
+`<ID>` は報告書の題名の下に出る実行 ID です。
+
+```{python}
+#| tags: [parameters]
+project = "example-python"
+```
+
+```{python}
+#| label: setup
+#| include: false
+import os
+from pathlib import Path
+import sys
+
+from IPython.display import Markdown, display
+
+root = Path.cwd()
+if os.getenv("AUDIT_RUNNER") != "python":
+    raise RuntimeError("Python の検査用の中で描いてください（README.md「第 2 段階の中身」）。")
+sys.path.insert(0, str(root / "src"))
+
+import container
+import project as project_config
+import repro
+from generate_dockerfile import generate_python_dockerfile
+```
+
+```{python}
+#| label: generate
+#| include: false
+cfg = project_config.load_project_config(project)
+configured_lock = cfg["image"].get("dependency_lock")
+if configured_lock is not None and not isinstance(configured_lock, str):
+    raise ValueError("設定ファイルの image.dependency_lock は文字にしてください。")
+lock = project_config.required_lock(configured_lock)
+_, request = project_config.target_inputs(project)
+inputs = [
+    project_config.project_folder(project) / "config.yaml",
+    *request.values(), *project_config.lock_inputs(lock), "../contracts/lock-files.tsv",
+    "../contracts/build-environment.schema.json", "notebooks/python-dockerfile-generate.qmd",
+    "src/container.py", "src/contract.py", "src/discovery.py", "src/evidence.py",
+    "src/generate_dockerfile.py", "src/image.py", "src/project.py", "src/repro.py",
+    "dockerfile-templates/Dockerfile.generate", "../tools/publish-dockerfile.sh",
+]
+repro.set_seed(cfg["seed"])
+state = repro.run(cfg, inputs=inputs)
+state.ledger = {"project": project, "stage": "dockerfile", "dependency_lock": container.shown_path(lock)}
+try:
+    settings = cfg.get("dockerfile")
+    if settings is None:
+        settings = {}
+    if not isinstance(settings, dict):
+        raise ValueError("設定ファイルの dockerfile はキーと値の組にしてください。")
+    replace = settings.get("replace")
+    if replace is None:
+        replace = False
+    if not isinstance(replace, bool):
+        raise ValueError("設定ファイルの dockerfile.replace は true か false にしてください。")
+    destination = generate_python_dockerfile(project, replace=replace)
+    files = [destination / name for name in ("Dockerfile", "ubuntu-pins.txt", "pylock.toml")]
+    state.artifacts = files
+    generated = [(container.shown_path(path), container.file_sha256(path)) for path in files]
+    repro.finish(state)
+except BaseException as error:
+    repro.fail(state, error)
+    raise
+
+report_id = state.run_id
+```
+
+報告書の ID は `{python} report_id`、プロジェクトは `{python} project` です。
+
+# 生成したファイル {#result-generated-files}
+
+「ファイル」は Python 側のプロジェクトのルートからのパス、「SHA-256」は配置したファイルのハッシュです。同じファイルかを確認するときは、パスとハッシュを照合します。
+
+| ファイル | ビルドでの役割 |
+|---|---|
+| `Dockerfile` | 固定ベースと取得元を指定し、確定した依存を導入するための手順。 |
+| `ubuntu-pins.txt` | 確定した Ubuntu パッケージの版の一覧。 |
+| `pylock.toml` | Python の配布物の版、wheel の取得元と SHA-256。 |
+
+```{python}
+#| label: generated-files
+#| echo: false
+rows = ["| ファイル | SHA-256 |", "|---|---|"]
+rows.extend(f"| `{path}` | `{digest}` |" for path, digest in generated)
+display(Markdown("\n".join(rows)))
+```
+
+# 第 3 段階に渡すもの
+
+同じプロジェクト、同じ `image.dependency_lock` を指定し、生成した `dockerfile/` 一式を使って第 3 段階の報告書（`python-image-build.qmd`）を描画します。

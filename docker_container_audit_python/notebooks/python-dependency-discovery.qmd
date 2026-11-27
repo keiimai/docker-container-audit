@@ -1,0 +1,257 @@
+---
+title: "Python と Ubuntu の依存の調査と確定（第 1 段階）"
+format: html
+jupyter: python3
+execute:
+  cache: false
+  daemon: false
+---
+
+第 1 段階では、指定したプラットフォームで Python のプログラムを動かすために必要な言語パッケージと Ubuntu パッケージを調べ、採用する版を確定します。
+
+# この報告書の読み方
+
+::: {.callout-note}
+まず [工程ごとの判定](#result-steps) の `confirm` を見ます。`PASS` なら [第 2 段階に渡す値](#result-dockerfile-inputs) の `dependency_lock` を使います。`REVIEW` なら [採用する依存の確定](#result-confirm) の `dependency-review`、`FAIL` や `NOT_RUN` なら `discover` と `confirm` の `detail` を確認します。
+
+題名の下にある実行 ID を、保存先の `<ID>` に当てはめてください。
+:::
+
+## 各工程でやること
+
+| 工程 | すること | `PASS` になる条件 | 主な結果 |
+|---|---|---|---|
+| [依存の調査](#result-discover)（`discover`） | 固定ベースから調査用環境を作り、Python の依存と共有ライブラリに必要な Ubuntu パッケージを調べる。 | パッケージの版と導入計画を決め、要確認項目がない。 | `python-packages`、`ubuntu-packages`、`python-ubuntu-review` |
+| [採用する依存の確定](#result-confirm)（`confirm`） | 調査の記録と現在の入力を照合し、版とハッシュを固定する。 | 照合を通過し、要確認項目がすべて解消して確定記録ができる。 | `dependency-confirmation`、`dependency-review`、`dependency-lock.tsv` |
+
+| 判定 | 読み方 |
+|---|---|
+| `PASS` | 工程を完了し、その工程の照合条件を満たしました。 |
+| `REVIEW` | 確認が必要な項目があります。`detail` で理由を確認します。 |
+| `FAIL` | 工程の処理または照合に失敗しました。`detail` と工程のログを確認します。 |
+| `NOT_RUN` | 確定に使える調査結果が得られず、後続の工程を実行していません。 |
+
+## 実行と出力
+
+`project` で対象を選びます。既定は `example-python` です。`projects/<名前>/request/` に `requirements.txt`、`base.txt`、必要に応じて `ubuntu-packages.txt` を置きます。対象プラットフォーム、APT スナップショットの時点、確認根拠のファイルは `projects/<名前>/config.yaml` で設定します。
+
+Docker とネットワークに接続できる環境で、Python 側のプロジェクトのルートから `bash tools/runner.sh render notebooks/python-dependency-discovery.qmd project:<名前>` を実行します。
+
+| 探すもの | 保存先 |
+|---|---|
+| HTML 報告書 | `outputs/reports/<ID>/` |
+| 判定表 `steps.csv` と各結果表 | `outputs/tables/<ID>/` |
+| 照合の元データとログ | `outputs/evidence/<ID>/<工程>/` |
+| 確定記録 `dependency-lock.tsv` と関連ファイル | `outputs/evidence/<ID>/confirm/` |
+| 実行記録と設定の写し | `outputs/repro/<ID>/` |
+
+```{python}
+#| tags: [parameters]
+project = "example-python"
+```
+
+```{python}
+#| label: setup
+#| include: false
+NOTEBOOK = "notebooks/python-dependency-discovery.qmd"
+import contextlib
+import os
+from pathlib import Path
+import sys
+
+from IPython.display import Markdown, display
+
+root = Path.cwd().resolve()
+while not (root / "src" / "project.py").is_file():
+    if root.parent == root:
+        raise RuntimeError("プロジェクトのルートを特定できません。")
+    root = root.parent
+# --- Python の検査用（Dockerfile.runner）の /opt/venv の中でなければ止める ---
+environment = Path(os.getenv("UV_PROJECT_ENVIRONMENT") or root / ".venv")
+if os.getenv("AUDIT_RUNNER") != "python" or Path(sys.prefix).resolve() != environment.resolve():
+    raise RuntimeError(
+        f"Python の検査用の中で描いてください（いまは {sys.executable}）。"
+        f"`bash tools/runner.sh render {NOTEBOOK} project:<名前>`（子の根で）"
+        "を実行します（README.md「本番の手順」）。"
+    )
+sys.path.insert(0, str(root / "src"))
+import repro
+import evidence
+import discovery as discovery_ops
+import project as project_config
+
+# --- 設定を projects/<project>/config.yaml から読む ---
+cfg = project_config.load_project_config(project, stage="discovery")
+repro.set_seed(cfg["seed"])
+platform = cfg["platform"]
+session = evidence.report_session(root, display, Markdown)
+
+# --- 工程の外で止まったら、記録を failed にしてから止める ---
+@contextlib.contextmanager
+def stop_on_error():
+    try:
+        yield
+    except BaseException as error:
+        repro.fail(state, error)
+        raise
+
+discovery_settings = cfg.get("discovery") or {}
+apt_snapshot = discovery_settings.get("apt_snapshot") or None
+review_notes = discovery_settings.get("review_notes") or ""
+```
+
+```{python}
+#| label: begin
+#| include: false
+# --- 記録を始める（実行 ID は runner.sh render が渡す REPRO_RUN_ID）---
+record_inputs = [
+    *project_config.report_inputs(project, "discovery"),
+    "notebooks/python-dependency-discovery.qmd",
+]
+state = repro.run(cfg, inputs=record_inputs)
+report_id = state.run_id
+with stop_on_error():
+    session.begin(report_id)
+```
+
+報告書の ID は `{python} report_id`、プロジェクトは `{python} project`、プラットフォームは `{python} platform` です。
+
+# 依存の調査（discover） {#result-discover}
+
+`Dockerfile.inspect` で固定ベースから調査用の環境を作ります。uv で `requirements.txt` の要件を満たす wheel を対象プラットフォーム向けに解決し、取得元と SHA-256 を `pylock.toml` に記録します。調査用の仮想環境には、ハッシュを照合した wheel を入れます。
+
+`ldd` で共有ライブラリが読み込むファイルを調べ、見つからないライブラリの提供元を日付で固定した Ubuntu のパッケージ索引（Contents）から探します。その結果を使って、Ubuntu パッケージの追加や更新を試算します。
+
+| 表 | 見るところ |
+|---|---|
+| `python-packages` | Python の配布物の版と SHA-256。`requested` が真の行は `requirements.txt` で指定した配布物です。同じ配布物の版に対象プラットフォームで使える wheel が複数あれば、ハッシュは複数行に分かれます。 |
+| `discovery-native-libraries` | どのパッケージ（`language_package`）のファイル（`file`）が、どのライブラリ名（`soname`）を必要とするかを示します。`path` は見つかった場所です。 |
+| `ubuntu-packages` | `package` と `architecture` が照合の単位です。`action` が `keep` なら維持、`install` なら追加、`update` なら更新です。`relation` は固定ベース由来（`base`）、直接必要（`direct`）、間接的に追加（`indirect`）の区別です。`language_packages` に必要とした配布物が載ります。 |
+| `python-ubuntu-review` | 共有ライブラリの提供元が不明、候補が複数ある項目、対象に合う wheel が見つからない要件。`item` と `detail` を読み、提供元の候補は必要に応じて `ubuntu-packages.txt` に指定します。 |
+
+`update` の行は `base_version` と `version` を比べます。更新や要確認項目の扱いは次の確定工程で確認します。調査のログは `outputs/evidence/<ID>/discover/` にあります。
+
+```{python}
+#| label: discover
+#| echo: false
+with stop_on_error():
+    discovery = session.run_step("discover", lambda run_id: discovery_ops.resolve_python_dependencies(
+        project, platform, apt_snapshot=apt_snapshot, run_id=run_id,
+    ))
+    if discovery:
+        directory = Path(discovery["directory"])
+        rows = session.read_tsv(directory / "python-packages.tsv")
+        if rows:
+            session.show_table("python-packages", [{**row, "requested": row["requested"] == "TRUE"} for row in rows])
+        native_libraries = directory / "native-libraries.tsv"
+        if native_libraries.is_file():
+            session.show_table("discovery-native-libraries", session.read_tsv(native_libraries))
+        session.show_table("ubuntu-packages", session.read_tsv(directory / "ubuntu-packages.tsv"))
+        session.show_table("python-ubuntu-review", session.read_tsv(directory / "review.tsv"))
+```
+
+# 採用する依存の確定（confirm） {#result-confirm}
+
+調査時のプラットフォームや入力のハッシュを現在の設定と `request/` に照らし合わせます。版の条件と配布物の SHA-256 を確認し、要確認項目がすべて解消したら、`dependency-lock.tsv` と関連ファイルを確定記録として保存します。
+
+| 表 | 見るところ |
+|---|---|
+| `dependency-confirmation` | `status` は確定の判定です。`language_packages` は固定する Python 配布物の数、`ubuntu_packages` は Ubuntu パッケージの導入計画に載った件数、`unresolved` は未解消の項目数です。 |
+| `dependency-review` | `item` と `detail` が確認項目とその内容です。`decision` が空の行は未解消です。根拠を指定した行には、その内容が入ります。 |
+
+要確認項目は、入力を見直して調査し直すか、根拠を示せる項目について `item`・`detail`・`reason` の 3 列の TSV を用意します。TSV のパスを `config.yaml` の `discovery.review_notes` に指定し、報告書を描画し直します。
+
+対象に合う wheel が見つからない要件は、`requirements.txt` などの調査条件を見直して再調査します。
+
+```{python}
+#| label: confirm
+#| echo: false
+with stop_on_error():
+    lock = None
+    if discovery:
+        confirmed = session.run_step("confirm", lambda run_id: discovery_ops.confirm_python_dependencies(
+            discovery["directory"], project, platform, run_id=run_id,
+            review_notes=(root / review_notes) if review_notes else None,
+        ))
+        if confirmed:
+            session.show_table("dependency-confirmation", [confirmed])
+            session.show_table("dependency-review", session.read_tsv(Path(confirmed["evidence"]) / "dependency-review.tsv"))
+        if confirmed and confirmed["lock"]:
+            lock = Path(confirmed["lock"])
+            display(Markdown(f"確定記録 `{lock.relative_to(root)}`"))
+    else:
+        session.run_step("confirm", detail="調査が済んでいないため、確定していません。")
+```
+
+# 第 2 段階に渡す値 {#result-dockerfile-inputs}
+
+確定できると、`dockerfile-inputs` の `item` と `value` に、Dockerfile の生成に使う値が出ます。`dependency_lock` の値を対象プロジェクトの `config.yaml` の `image.dependency_lock` に設定します。第 2・第 3 段階で照合するため、`confirm/` フォルダは一式を保管します。
+
+| 項目 | 使い道 |
+|---|---|
+| `project` | 第 2・第 3 段階で指定する対象プロジェクト名。 |
+| `dependency_lock` | `image.dependency_lock` に指定する `dependency-lock.tsv` のパス。 |
+| `base_image`、`platform`、`apt_snapshot` | 確定した固定ベース、対象プラットフォーム、Ubuntu パッケージの取得時点。 |
+| `ubuntu_pins` | Dockerfile の生成時にコピーする、Ubuntu パッケージの版を固定した `ubuntu-pins.txt`。 |
+| `language_pins` | Python 配布物の版と SHA-256 を記録した `python-pins.tsv`。 |
+| `python_version` | 確定した Python のバージョン。 |
+| `pylock` | Dockerfile の生成時にコピーする、取得元と SHA-256 を固定した `pylock.toml`。 |
+
+```{python}
+#| label: dockerfile-inputs
+#| echo: false
+with stop_on_error():
+    session.show_table("dockerfile-inputs", discovery_ops.dockerfile_input_rows(lock, project) if lock else [])
+    if lock is not None:
+        display(Markdown(
+            "第 2 段階は、設定ファイルの `image.dependency_lock` に "
+            f"`{lock.relative_to(root)}` を書いてから、"
+            "`bash tools/runner.sh render notebooks/python-dockerfile-generate.qmd "
+            f"project:{project}` で描きます。"
+        ))
+```
+
+# 工程の照合 {#result-operation-checks}
+
+`steps` で確認したい工程があれば、`operation-checks` で同じ `step` の行を探し、`check`（照合項目）、`status`（判定）、`detail`（理由や件数）を読みます。`operation-check-items` に同じ項目の行があれば、個別の `item` ごとに `expected`（期待値）と `found`（実際の値）を比較できます。
+
+```{python}
+#| label: operation-checks
+#| echo: false
+with stop_on_error():
+    session.show_operation_checks()
+```
+
+# 使用したツールのバージョン
+
+`tool-versions` の `step` はツールを使った工程、`tool` はツール名、`version` は記録されたバージョンです。`render` の行は報告書の描画に使った Quarto のバージョンです。
+
+```{python}
+#| label: tool-versions
+#| echo: false
+with stop_on_error():
+    session.show_table("tool-versions", session.tool_versions)
+```
+
+# 工程ごとの判定 {#result-steps}
+
+`steps` は工程ごとに 1 行です。`step` と `status` で工程名と判定を確かめ、`detail` で補足を読みます。個別の照合は [工程の照合](#result-operation-checks) に、元の検査結果やログは `outputs/evidence/<ID>/<工程>/` にあります。`run_id` が入っている行では、その値が保存先の `<ID>` です。
+
+```{python}
+#| label: run-index
+#| echo: false
+with stop_on_error():
+    session.show_table("steps", session.steps)
+```
+
+```{python}
+#| label: finish
+#| include: false
+# --- 表・証跡のファイルと各工程の判定を記録に入れて終える ---
+with stop_on_error():
+    state.artifacts = session.artifacts()
+    state.ledger = session.ledger(
+        project=project, stage="discovery", dependency_lock=os.path.relpath(lock, root) if lock else "",
+    )
+repro.finish(state)
+```
